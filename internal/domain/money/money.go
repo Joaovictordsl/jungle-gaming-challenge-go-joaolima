@@ -81,3 +81,35 @@ func (m Money) Add(other Money) (Money, error) {
 
 	return Money{cents: other.cents + m.cents, currency: m.currency}, nil
 }
+
+func (m Money) Subtract(other Money) (Money, error) {
+	if m.currency == "" || other.currency == "" {
+		return Money{}, errors.New("Moeda vazia.")
+	}
+
+	if m.currency != other.currency {
+		return Money{}, errors.New("Moeda errada.")
+	}
+
+	if other.cents > 0 && m.cents < math.MinInt64+other.cents {
+		return Money{}, errors.New("Valor menor que o permitido.")
+	}
+
+	if other.cents < 0 && m.cents > math.MaxInt64+other.cents {
+		return Money{}, errors.New("Valor maior que o permitido.")
+	}
+
+	return Money{cents: m.cents - other.cents, currency: m.currency}, nil
+}
+
+func (m Money) Negate() (Money, error) {
+	if m.currency == "" {
+		return Money{}, errors.New("Moeda vazia.")
+	}
+
+	if m.cents == math.MinInt64 {
+		return Money{}, errors.New("Valor maior que o permitido.")
+	}
+
+	return Money{cents: -m.cents, currency: m.currency}, nil
+}
