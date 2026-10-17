@@ -17,5 +17,21 @@ services:
       retries: 10
       start_period: 10s
 
+  migrate:
+    image: migrate/migrate:v4.20.1
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - "./migrations:/migrations:ro"
+    entrypoint:
+      - migrate
+      - -path
+      - /migrations
+      - -database
+      - "postgres://postgres:postgres_local@postgres:5432/jungle?sslmode=disable&search_path=public"
+    command: ["up"]
+
 volumes:
   postgres_data:

@@ -73,8 +73,44 @@ para permitir testes determinísticos.
 O construtor cria o estado do agregado. A persistência da carteira e os lançamentos
 e eventos de abertura serão coordenados pelo caso de uso em uma transação SQL.
 
+## Migrations de PostgreSQL
+
+O schema é evoluído por pares SQL `NNNNNN_nome.up.sql` e `NNNNNN_nome.down.sql`,
+executados pelo serviço `migrate` do Compose, com `golang-migrate` v4.20.1. O serviço
+usa a rede interna (`postgres:5432`), aguarda o banco saudável e monta os arquivos
+em modo somente leitura. O controle de versão fica em `public.schema_migrations`.
+
+A primeira migration cria `wallets` com saldo em `BIGINT`, moeda suportada,
+versão positiva, timestamps obrigatórios, IDs preenchidos e unicidade de
+`(player_id, currency)`. O repositório e a transação financeira ainda serão
+implementados. Os comandos de aplicação e reversão estão no `README.md`.
+
+## Conexões, composição e ciclo de vida
+
+O acesso ao PostgreSQL usa `github.com/jackc/pgx/v5`, com `pgxpool` para compartilhar
+conexões entre operações de uma instância. A configuração é lida de variáveis de
+ambiente; URL obrigatória, timeout positivo e limite positivo de conexões são
+validados antes da inicialização.
+
+`internal/app` compõe a aplicação com Uber Fx. O módulo `postgres` fornece o pool
+por construtor e registra hooks em `fx.Lifecycle`. `OnStart` faz `Ping` com contexto
+e timeout, pois construir um pool não garante que o banco esteja acessível. Uma
+falha nessa etapa fecha o pool antes de interromper a inicialização. `OnStop` fecha
+as conexões. Os futuros consumidores do pool deverão encerrar antes desse hook,
+respeitando a ordem inversa de inicialização do Fx.
+
+`app.Run` utiliza o tratamento de sinais do Fx. Os limites globais são 15 segundos
+para inicialização e 10 segundos para encerramento. O timeout de conexão padrão
+é 5 segundos; o contexto de inicialização pode impor um limite menor. Os logs são
+JSON e os erros de conexão são classificados sem expor a URL ou a senha.
+
+O domínio permanece independente de `pgx`, Fx e configuração de ambiente.
+Repositórios com SQL explícito e a delimitação da transação financeira ainda serão
+implementados; o pool por si só não oferece atomicidade entre operações de negócio.
+
 ## Escopo atual
 
-O domínio implementa `Money` e o construtor de `Wallet`. Movimentações de carteira,
-ledger, persistência, transações SQL, autenticação, HTTP, SQS, inbox/outbox e ciclo
-de vida serão definidos nas próximas etapas.
+O domínio implementa `Money` e o construtor de `Wallet`; o ambiente local inclui
+PostgreSQL, migrations e a conexão da aplicação com ciclo de vida Fx. Movimentações
+de carteira, ledger, repositórios, transações SQL, autenticação, HTTP, SQS e
+inbox/outbox serão definidos nas próximas etapas.
