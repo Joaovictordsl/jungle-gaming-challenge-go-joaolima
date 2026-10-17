@@ -2,7 +2,9 @@ package money
 
 import (
 	"errors"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 type Money struct {
@@ -38,5 +40,20 @@ func New(decimal string, currency string) (Money, error) {
 		return Money{}, errors.New("valor fora do escopo.")
 	}
 
-	return Money{}, nil
+	dec := str[0] + str[1]
+
+	for _, val := range dec {
+
+		if !unicode.IsNumber(val) {
+			return Money{}, errors.New("O valor não é um número.")
+		}
+	}
+
+	cents, err := strconv.ParseInt(dec, 10, 64)
+	if err != nil {
+		return Money{}, errors.New("Erro de parse.")
+
+	}
+
+	return Money{cents: cents, currency: currency}, nil
 }
