@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 type Money struct {
@@ -44,7 +43,7 @@ func New(decimal string, currency string) (Money, error) {
 
 	for _, val := range dec {
 
-		if !unicode.IsNumber(val) {
+		if val < '0' || val > '9' {
 			return Money{}, errors.New("O valor não é um número.")
 		}
 	}
