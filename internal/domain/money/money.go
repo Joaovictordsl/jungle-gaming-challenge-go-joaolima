@@ -2,6 +2,7 @@ package money
 
 import (
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -55,4 +56,28 @@ func New(decimal string, currency string) (Money, error) {
 	}
 
 	return Money{cents: cents, currency: currency}, nil
+}
+
+func (m Money) Add(other Money) (Money, error) {
+
+	if other.currency == "" || m.currency == "" {
+		return Money{}, errors.New("Moeda vazia.")
+	}
+
+	if other.currency != m.currency {
+		return Money{}, errors.New("Moeda errada.")
+
+	}
+
+	if other.cents > 0 && m.cents > math.MaxInt64-other.cents {
+		return Money{}, errors.New("Valor Maior que o permitido.")
+
+	}
+
+	if other.cents < 0 && m.cents < math.MinInt64-other.cents {
+		return Money{}, errors.New("Valor menor que o permitido.")
+
+	}
+
+	return Money{cents: other.cents + m.cents, currency: m.currency}, nil
 }
