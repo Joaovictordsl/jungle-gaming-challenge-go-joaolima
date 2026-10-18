@@ -20,38 +20,90 @@ type Wallet struct {
 // NewWallet cria o estado inicial da carteira. A persistência e o ledger serão
 // coordenados pelo caso de uso de abertura em uma única transação SQL.
 func NewWallet(id string, playerID string, initialBalance money.Money, createdAt time.Time) (Wallet, error) {
-	if strings.TrimSpace(id) == "" {
-		return Wallet{}, ErrInvalidID
-	}
-	if strings.TrimSpace(playerID) == "" {
-		return Wallet{}, ErrInvalidPlayerID
-	}
-	if err := initialBalance.Validate(); err != nil {
-		return Wallet{}, fmt.Errorf("saldo inicial: %w", err)
-	}
-
-	zero, err := money.Zero(initialBalance.Currency())
-	if err != nil {
-		return Wallet{}, fmt.Errorf("zero na moeda do saldo inicial: %w", err)
-	}
-	comparison, err := initialBalance.Compare(zero)
-	if err != nil {
-		return Wallet{}, fmt.Errorf("comparar saldo inicial: %w", err)
-	}
-	if comparison < 0 {
-		return Wallet{}, ErrNegativeBalance
-	}
-	if createdAt.IsZero() {
-		return Wallet{}, ErrInvalidTime
-	}
-
 	instant := createdAt.UTC()
-	return Wallet{
+	w := Wallet{
 		id:        id,
 		playerID:  playerID,
 		balance:   initialBalance,
 		version:   1,
 		createdAt: instant,
 		updatedAt: instant,
-	}, nil
+	}
+	if err := w.Validate(); err != nil {
+		return Wallet{}, err
+	}
+	return w, nil
+}
+
+// Rehydrate reconstrói o estado persistido, sem movimentar saldo, alterar versão
+// ou emitir eventos. Os instantes são preservados e representados em UTC.
+func Rehydrate(id string, playerID string, balance money.Money, version int64, createdAt time.Time, updatedAt time.Time) (Wallet, error) {
+	w := Wallet{
+		id:        id,
+		playerID:  playerID,
+		balance:   balance,
+		version:   version,
+		createdAt: createdAt.UTC(),
+		updatedAt: updatedAt.UTC(),
+	}
+	if err := w.Validate(); err != nil {
+		return Wallet{}, err
+	}
+	return w, nil
+}
+
+// Validate verifica as invariantes compartilhadas por criação e reidratação.
+func (w Wallet) Validate() error {
+	if strings.TrimSpace(w.id) == "" {
+		return ErrInvalidID
+	}
+	if strings.TrimSpace(w.playerID) == "" {
+		return ErrInvalidPlayerID
+	}
+	if err := w.balance.Validate(); err != nil {
+		return fmt.Errorf("saldo da carteira: %w", err)
+	}
+
+	zero, err := money.Zero(w.balance.Currency())
+	if err != nil {
+		return fmt.Errorf("zero na moeda do saldo: %w", err)
+	}
+	comparison, err := w.balance.Compare(zero)
+	if err != nil {
+		return fmt.Errorf("comparar saldo: %w", err)
+	}
+	if comparison < 0 {
+		return ErrNegativeBalance
+	}
+	if w.version < 1 {
+		return ErrInvalidVersion
+	}
+	if w.createdAt.IsZero() || w.updatedAt.IsZero() || w.updatedAt.Before(w.createdAt) {
+		return ErrInvalidTime
+	}
+	return nil
+}
+
+func (w Wallet) ID() string {
+	return w.id
+}
+
+func (w Wallet) PlayerID() string {
+	return w.playerID
+}
+
+func (w Wallet) Balance() money.Money {
+	return w.balance
+}
+
+func (w Wallet) Version() int64 {
+	return w.version
+}
+
+func (w Wallet) CreatedAt() time.Time {
+	return w.createdAt
+}
+
+func (w Wallet) UpdatedAt() time.Time {
+	return w.updatedAt
 }

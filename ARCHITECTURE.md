@@ -73,6 +73,13 @@ para permitir testes determinísticos.
 O construtor cria o estado do agregado. A persistência da carteira e os lançamentos
 e eventos de abertura serão coordenados pelo caso de uso em uma transação SQL.
 
+`wallet.Rehydrate` reconstrói uma carteira persistida preservando identidade,
+saldo, versão e instantes. A função não executa movimentações nem emite eventos;
+os instantes são normalizados para UTC sem alterar o momento representado.
+Criação e reidratação compartilham `Wallet.Validate`, que também exige versão
+positiva e atualização igual ou posterior à criação. Os métodos de consulta
+expõem cópias dos valores encapsulados para uso pelo repositório.
+
 ## Migrations de PostgreSQL
 
 O schema é evoluído por pares SQL `NNNNNN_nome.up.sql` e `NNNNNN_nome.down.sql`,
@@ -110,7 +117,7 @@ implementados; o pool por si só não oferece atomicidade entre operações de n
 
 ## Escopo atual
 
-O domínio implementa `Money` e o construtor de `Wallet`; o ambiente local inclui
+O domínio implementa `Money`, criação e reidratação de `Wallet`; o ambiente local inclui
 PostgreSQL, migrations e a conexão da aplicação com ciclo de vida Fx. Movimentações
 de carteira, ledger, repositórios, transações SQL, autenticação, HTTP, SQS e
 inbox/outbox serão definidos nas próximas etapas.
