@@ -1,0 +1,5 @@
+simulation: oidc-local
+routing: path
+mocks:
+  - routeKey: keycloak
+    path: ../mocks/keycloak/config.yaml

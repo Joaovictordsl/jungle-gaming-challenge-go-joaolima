@@ -1,0 +1,259 @@
+openapi: 3.0.3
+info:
+  title: Jungle Gaming API
+  version: 0.1.0
+  description: Contrato dos endpoints HTTP implementados nesta etapa.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /wallets:
+    post:
+      operationId: openWallet
+      summary: Abre uma carteira pelo serviço interno
+      description: |
+        Exige o cliente jungle-internal e o papel wallets:write.
+        Saldo positivo cria carteira, OPENING, crédito no ledger e dois eventos
+        na outbox no mesmo commit. Saldo zero cria somente a carteira.
+        O par (playerId, currency) é único; uma repetição resulta em conflito.
+        O JSON deve ter somente os campos definidos, sem chaves duplicadas.
+        O corpo é limitado a 16384 bytes. Dinheiro deve vir como string decimal.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenWalletRequest'
+            example:
+              playerId: player-1
+              initialBalance: {amount: '100.00', currency: BRL}
+      responses:
+        '201':
+          description: Abertura confirmada no banco.
+          headers:
+            Location:
+              description: Caminho da carteira criada.
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+        '400':
+          $ref: '#/components/responses/InvalidWalletRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Já existe carteira para o mesmo jogador e moeda.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: wallet_already_exists}
+        '413':
+          description: Corpo maior que 16384 bytes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: body_too_large}
+        '415':
+          description: Content-Type ausente ou diferente de application/json.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: unsupported_media_type}
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/WalletServiceUnavailable'
+  /wallets/{walletId}:
+    get:
+      operationId: findWalletByID
+      summary: Consulta uma carteira pelo serviço interno
+      description: Exige o cliente jungle-internal e o papel wallets:read. Não altera saldo ou versão.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: walletId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Estado persistido da carteira.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+        '400':
+          $ref: '#/components/responses/InvalidWalletRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Carteira não encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: wallet_not_found}
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/WalletServiceUnavailable'
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: Verifica se o processo responde a requisições HTTP
+      description: |
+        Endpoint público, sem autenticação e sem efeitos colaterais.
+        Não consulta PostgreSQL ou SQS e não representa readiness.
+      security: []
+      responses:
+        '200':
+          description: O processo responde.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+              example:
+                status: ok
+        '405':
+          description: Método diferente de GET não é suportado neste caminho.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: method_not_allowed
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access token RS256 emitido pelo realm jungle, com audiência jungle-api.
+        Rotas de carteira exigem também o cliente jungle-internal e o papel
+        wallets:read ou wallets:write conforme a operação.
+  responses:
+    InvalidWalletRequest:
+      description: |
+        JSON inválido, campos ausentes, desconhecidos ou duplicados, tipo incorreto,
+        jogador/ID inválido ou valor/moeda inválidos. Códigos possíveis:
+        invalid_request, invalid_player_id, invalid_wallet_id, invalid_amount,
+        invalid_currency.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: invalid_request}
+    InternalError:
+      description: Falha interna; não informa sucesso sem confirmação da abertura.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: internal_error}
+    WalletServiceUnavailable:
+      description: |
+        Falha transitória de persistência, timeout/cancelamento ou consulta
+        necessária ao IdP indisponível. Códigos: service_unavailable ou
+        authentication_unavailable. Em uma falha de conexão ao redor do commit,
+        o resultado pode ser indeterminado; não presuma que uma nova tentativa
+        realizará uma nova abertura. A unicidade de jogador/moeda impede duplicação.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: service_unavailable}
+    Unauthorized:
+      description: Bearer ausente, malformado, expirado ou inválido.
+      headers:
+        WWW-Authenticate:
+          schema: {type: string}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: unauthorized}
+    Forbidden:
+      description: Identidade autenticada sem cliente ou permissão exigidos.
+      headers:
+        WWW-Authenticate:
+          schema: {type: string}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: forbidden}
+    AuthenticationUnavailable:
+      description: Consulta necessária ao IdP indisponível ou com timeout.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: authentication_unavailable}
+  schemas:
+    Money:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^[0-9]+\.[0-9]{2}$'
+          description: |
+            Decimal não negativo com duas casas; máximo 92233720368547758.07.
+            Zeros à esquerda são aceitos e normalizados na resposta.
+          example: '100.00'
+        currency:
+          type: string
+          enum: [BRL, USD]
+    OpenWalletRequest:
+      type: object
+      additionalProperties: false
+      required: [playerId, initialBalance]
+      properties:
+        playerId:
+          type: string
+          minLength: 1
+          description: Deve conter ao menos um caractere diferente de espaço.
+        initialBalance:
+          $ref: '#/components/schemas/Money'
+    Wallet:
+      type: object
+      additionalProperties: false
+      required: [id, playerId, balance, version]
+      properties:
+        id: {type: string}
+        playerId: {type: string}
+        balance:
+          $ref: '#/components/schemas/Money'
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string

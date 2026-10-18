@@ -1,0 +1,95 @@
+{
+  "realm": "jungle",
+  "enabled": true,
+  "displayName": "Jungle Gaming Local",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "loginWithEmailAllowed": false,
+  "accessTokenLifespan": 300,
+  "defaultSignatureAlgorithm": "RS256",
+  "roles": {
+    "client": {
+      "jungle-api": [
+        { "name": "wallets:read", "description": "Consultar carteiras pelo serviço interno" },
+        { "name": "wallets:write", "description": "Abrir carteiras pelo serviço interno" }
+      ]
+    }
+  },
+  "clients": [
+    {
+      "clientId": "jungle-api",
+      "name": "Jungle API",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "jungle-internal",
+      "name": "Serviço interno de carteiras",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_INTERNAL_CLIENT_SECRET}",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "jungle-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jungle-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "jungle-api-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "jungle-api",
+            "claim.name": "resource_access.jungle-api.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clientScopeMappings": {
+    "jungle-api": [
+      {
+        "client": "jungle-internal",
+        "roles": ["wallets:read", "wallets:write"]
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "service-account-jungle-internal",
+      "enabled": true,
+      "serviceAccountClientId": "jungle-internal",
+      "clientRoles": {
+        "jungle-api": ["wallets:read", "wallets:write"]
+      }
+    }
+  ]
+}

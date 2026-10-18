@@ -1,0 +1,46 @@
+openapi: 3.0.3
+info:
+  title: Local Keycloak OIDC dependency
+  version: 1.0.0
+  description: |
+    Subconjunto OIDC usado pelo verificador, baseado nos endpoints oficiais do
+    Keycloak e no realm local. A simulação não representa login de usuários.
+servers:
+  - url: http://127.0.0.1:4900/keycloak
+paths:
+  /realms/jungle/.well-known/openid-configuration:
+    get:
+      operationId: oidcDiscovery
+      responses:
+        '200':
+          description: Metadados do realm.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuer, jwks_uri, id_token_signing_alg_values_supported]
+                properties:
+                  issuer: {type: string}
+                  jwks_uri: {type: string}
+                  id_token_signing_alg_values_supported:
+                    type: array
+                    items: {type: string}
+        '503':
+          description: IdP temporariamente indisponível.
+  /realms/jungle/protocol/openid-connect/certs:
+    get:
+      operationId: oidcJWKS
+      responses:
+        '200':
+          description: Chaves públicas do realm.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items: {type: object}
+        '503':
+          description: JWKS temporariamente indisponível.

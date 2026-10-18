@@ -84,6 +84,17 @@ func (w Wallet) Validate() error {
 	return nil
 }
 
+// ValidateInitialState impede usar uma carteira já movimentada como nova abertura.
+func (w Wallet) ValidateInitialState() error {
+	if err := w.Validate(); err != nil {
+		return err
+	}
+	if w.version != 1 || !w.createdAt.Equal(w.updatedAt) {
+		return ErrNotInitialState
+	}
+	return nil
+}
+
 func (w Wallet) ID() string {
 	return w.id
 }

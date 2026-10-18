@@ -59,6 +59,15 @@ func New(decimal string, currency string) (Money, error) {
 	return Money{cents: cents, currency: currency}, nil
 }
 
+// FromMinorUnits reconstrói um valor interno a partir de centavos, como os de uma
+// coluna BIGINT. Entradas financeiras externas devem continuar usando New.
+func FromMinorUnits(cents int64, currency string) (Money, error) {
+	if err := validateCurrency(currency); err != nil {
+		return Money{}, err
+	}
+	return Money{cents: cents, currency: currency}, nil
+}
+
 // Zero cria um zero válido na moeda solicitada.
 func Zero(currency string) (Money, error) {
 	if err := validateCurrency(currency); err != nil {

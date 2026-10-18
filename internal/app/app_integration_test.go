@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	nethttp "net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -16,7 +18,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	applicationwallet "jungle-gaming-challenge-go-joaolima/internal/application/wallet"
 	"jungle-gaming-challenge-go-joaolima/internal/config"
+	"jungle-gaming-challenge-go-joaolima/internal/domain/wallet"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/auth"
+	httpserver "jungle-gaming-challenge-go-joaolima/internal/infrastructure/http"
 	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/postgres"
 )
 
@@ -33,12 +39,28 @@ func integrationConfig(t *testing.T) config.Config {
 	}
 }
 
+// Estes testes isolam o ciclo de vida HTTP/PostgreSQL. O OIDC real é exercitado
+// separadamente nos testes de simulação e Keycloak.
+type unavailableTokenVerifier struct{}
+
+func (unavailableTokenVerifier) Verify(context.Context, string) (auth.Principal, error) {
+	return auth.Principal{}, auth.ErrUnavailable
+}
+
+func isolatedAuth() fx.Option {
+	return fx.Replace(fx.Annotate(unavailableTokenVerifier{}, fx.As(new(auth.TokenVerifier))))
+}
+
 func TestPostgresLifecycleIntegration(t *testing.T) {
 	cfg := integrationConfig(t)
 	var pool *pgxpool.Pool
+	var repository wallet.Repository
+	var openWallet *applicationwallet.OpenWallet
+	var server *httpserver.Server
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	application := New(fx.Replace(cfg, logger), fx.Populate(&pool))
+	httpConfig := config.HTTP{Address: "127.0.0.1:0", ShutdownTimeout: time.Second}
+	application := New(isolatedAuth(), fx.Replace(cfg, logger, httpConfig), fx.Populate(&pool, &repository, &openWallet, &server))
 	if err := application.Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +76,16 @@ func TestPostgresLifecycleIntegration(t *testing.T) {
 	if err := application.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	client := &nethttp.Client{Timeout: time.Second}
+	response, err := client.Get("http://" + server.Address() + "/health/live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != nethttp.StatusOK || string(body) != `{"status":"ok"}` {
+		t.Fatalf("Servidor da aplicação deve responder ao health check: %s, %v", body, err)
+	}
 	var one int
 	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil || one != 1 {
 		t.Fatalf("Consulta no PostgreSQL real falhou: %v", err)
@@ -65,6 +97,10 @@ func TestPostgresLifecycleIntegration(t *testing.T) {
 	if pool.Stat().MaxConns() != cfg.DatabaseMaxConns {
 		t.Fatal("Pool não respeitou o limite configurado")
 	}
+	probeID := "fx-repository-probe-" + time.Now().UTC().Format("20060102T150405.000000000")
+	if _, err := repository.FindByID(ctx, probeID); !errors.Is(err, wallet.ErrNotFound) {
+		t.Fatalf("Repositório fornecido pelo Fx deve consultar o PostgreSQL: %v", err)
+	}
 	if err := application.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +109,11 @@ func TestPostgresLifecycleIntegration(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "Pool do PostgreSQL encerrado") {
 		t.Fatal("Encerramento deve ser observável nos logs")
+	}
+	httpStop := strings.Index(logs.String(), "Servidor HTTP encerrado")
+	poolStop := strings.Index(logs.String(), "Pool do PostgreSQL encerrado")
+	if httpStop < 0 || httpStop > poolStop {
+		t.Fatal("Servidor HTTP deve encerrar antes do pool do PostgreSQL")
 	}
 }
 
@@ -87,7 +128,7 @@ func TestPostgresRejectsBadCredentialsIntegration(t *testing.T) {
 	cfg.DatabaseURL = parsed.String()
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	application := New(fx.Replace(cfg, logger))
+	application := New(isolatedAuth(), fx.Replace(cfg, logger, config.HTTP{Address: "127.0.0.1:0", ShutdownTimeout: time.Second}))
 	if err := application.Err(); err != nil {
 		t.Fatal(err)
 	}
