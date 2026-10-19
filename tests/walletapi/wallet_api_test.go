@@ -63,7 +63,7 @@ func walletAPIDatabase(t *testing.T) (context.Context, config.Config, *pgxpool.P
 		t.Fatal("Falha ao configurar banco isolado")
 	}
 	t.Cleanup(pool.Close)
-	for _, file := range []string{"000001_create_wallets.up.sql", "000002_wallet_opening.up.sql"} {
+	for _, file := range []string{"000001_create_wallets.up.sql", "000002_wallet_opening.up.sql", "000003_bet.up.sql", "000004_win.up.sql", "000005_loss.up.sql", "000006_refund.up.sql", "000007_rollback.up.sql", "000008_ledger_queries.up.sql"} {
 		data, err := os.ReadFile(filepath.Join("..", "..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)

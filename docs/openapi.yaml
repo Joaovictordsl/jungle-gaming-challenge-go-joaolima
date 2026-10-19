@@ -6,6 +6,177 @@ info:
 servers:
   - url: http://127.0.0.1:8080
 paths:
+  /wagering/transactions:
+    post:
+      operationId: processWagerTransaction
+      summary: Processa BET, WIN, LOSS, REFUND ou ROLLBACK do provedor autenticado
+      description: |
+        Aceita BET, WIN, REFUND e ROLLBACK com valor positivo e LOSS com valor zero. Exige wagering:write
+        e vínculo do azp com providerId em OIDC_PROVIDER_CLIENTS. O serviço interno
+        não pode apostar. O provedor do corpo deve coincidir com a identidade,
+        inclusive nos replays. JSON estrito, sem campos extras ou duplicados,
+        limitado a 16384 bytes. OPENING e outros tipos ainda não são aceitos.
+        Confirma resultado, saldo, ledger e outbox no mesmo commit.
+        WIN credita o prêmio; pode referenciar uma BET processada do mesmo provedor,
+        jogador, carteira, moeda, rodada e jogo. O valor do prêmio pode ser diferente
+        do valor apostado. Referência ausente ou ainda pendente produz PENDING_REFERENCE
+        durável e HTTP 202, sem crédito. Um worker retoma com backoff exponencial
+        (1s inicialmente, depois 2s, 4s, 8s, 16s, 30s...), máximo 8 tentativas ou
+        TTL de 5 minutos. Esgotamento produz REFERENCE_NOT_FOUND, definitivamente.
+        Referência incompatível produz REFERENCE_MISMATCH; aposta rejeitada produz
+        REFERENCE_REJECTED. Overflow de saldo produz BALANCE_OVERFLOW.
+        Não há aceite PENDING intermediário. Não publica eventos diretamente.
+        LOSS exige money.amount equivalente a 0.00 na moeda da carteira. Confirma
+        PROCESSED e somente WagerTransactionProcessed na outbox; não altera saldo,
+        versão ou timestamps da carteira e não cria ledger. Não aceita referência.
+        Replays preservam o saldo observado no LOSS original, mesmo após BET/WIN.
+        REFUND exige referenceExternalTransactionId de uma BET processada do mesmo
+        provedor, jogador, carteira, moeda, rodada e jogo. Devolve o valor integral;
+        valor diferente gera REFERENCE_AMOUNT_MISMATCH. Uma BET só pode receber uma
+        devolução bem-sucedida: outra operação retorna REJECTED/ALREADY_REVERSED.
+        Duplicatas da mesma chave continuam sendo replays do resultado original.
+        A referência ausente segue a retomada durável já descrita, com HTTP 202.
+        ROLLBACK exige referência obrigatória a BET, WIN ou REFUND processado,
+        com os mesmos provedor, jogador, carteira, moeda, rodada e jogo e valor integral.
+        BET é desfeita com crédito; WIN e REFUND, com débito. Saldo insuficiente para
+        desfazer crédito gera REVERSAL_INSUFFICIENT_FUNDS, distinto de INSUFFICIENT_FUNDS
+        usado no BET. Referência pendente segue o mesmo worker durável. Referências
+        a LOSS ou outro ROLLBACK são rejeitadas com REFERENCE_MISMATCH. Uma referência
+        admite uma única reversão processada: REFUND e ROLLBACK da mesma BET competem
+        pela mesma proteção; desfazer um REFUND não reabre essa BET para nova devolução.
+        Chave e conteúdo equivalentes retornam o resultado original persistido,
+        incluindo o saldo original, com idempotentReplay=true. Um ID externo
+        enviado com outra chave gera conflito, mesmo com conteúdo equivalente.
+        Repita a mesma requisição para acompanhar uma pendência: HTTP 202 enquanto
+        aguarda, 200 após processamento ou 422 após rejeição. O transactionId é estável.
+        Chaves e IDs externos são únicos por provedor, compartilhados por BET/WIN/LOSS/REFUND/ROLLBACK.
+        SHA-256 usa JSON com chaves
+        ordenadas de todos os campos do corpo, normalizando money.amount e
+        excluindo Idempotency-Key e metadados de transporte. Referência opcional
+        participa do hash quando presente; campo vazio ou null é inválido.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Uma única chave fornecida pelo chamador, não vazia, até 256 bytes.
+          schema: {type: string, minLength: 1, maxLength: 256}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/BetRequest'
+                - $ref: '#/components/schemas/WinRequest'
+                - $ref: '#/components/schemas/LossRequest'
+                - $ref: '#/components/schemas/RefundRequest'
+                - $ref: '#/components/schemas/RollbackRequest'
+            example:
+              providerId: provider-a
+              externalTransactionId: bet-1
+              playerId: player-1
+              walletId: wallet-1
+              roundId: round-1
+              gameId: game-1
+              kind: BET
+              money: {amount: '25.00', currency: BRL}
+      responses:
+        '200':
+          description: Operação confirmada ou replay; LOSS não movimenta saldo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BetResult'
+              example:
+                transactionId: transaction-1
+                status: PROCESSED
+                balance: {amount: '75.00', currency: BRL}
+                idempotentReplay: false
+        '202':
+          description: |
+            WIN, REFUND ou ROLLBACK persistido aguardando referência, sem crédito. Balance é apenas
+            o saldo observado na última tentativa, não um crédito confirmado.
+            O evento WagerTransactionPendingReference está na outbox.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BetResult'
+              example:
+                transactionId: win-pending-1
+                status: PENDING_REFERENCE
+                balance: {amount: '100.00', currency: BRL}
+                idempotentReplay: false
+        '400':
+          description: |
+            Entrada corrigível, sem registro de transação. Códigos invalid_request
+            (JSON, tipo, metadados ou dinheiro inválidos), invalid_idempotency_key
+            (header ausente/duplicado/longo), invalid_bet, invalid_loss, invalid_refund ou invalid_rollback
+            (carteira incompatível com jogador/moeda).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Carteira inexistente; nenhum resultado financeiro foi registrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {error: wallet_not_found}
+        '409':
+          description: |
+            idempotency_conflict para chave com outro conteúdo;
+            external_transaction_conflict para ID externo com outra chave.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Corpo maior que 16384 bytes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Content-Type diferente de application/json.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: |
+            Rejeição definitiva persistida por saldo insuficiente, overflow ou
+            referência inválida/rejeitada/esgotada. Não cria ledger
+            nem altera saldo/versão; grava WagerTransactionRejected na outbox.
+            Um replay preserva a rejeição e retorna este mesmo status HTTP.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BetResult'
+              example:
+                transactionId: transaction-2
+                status: REJECTED
+                balance: {amount: '20.00', currency: BRL}
+                failureCode: INSUFFICIENT_FUNDS
+                idempotentReplay: false
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: |
+            service_unavailable para falha transitória no banco ou timeout;
+            authentication_unavailable para consulta necessária ao IdP indisponível.
+            Limite de processamento SQL: 5s. Não informa sucesso sem commit.
+            Se o resultado do commit for incerto, repita a mesma chave e conteúdo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /wallets:
     post:
       operationId: openWallet
@@ -106,6 +277,220 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/WalletServiceUnavailable'
+  /wagering/transactions/{transactionId}:
+    get:
+      operationId: findTransaction
+      summary: Consulta uma transação pelo ID interno
+      description: Exige wagering:read para provedor vinculado ou wallets:read para o serviço interno. Provedor só enxerga suas transações; ID interno de outra origem retorna 404. Inclui OPENING somente para o serviço interno. Não reaplica a operação nem altera o resultado persistido.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: transactionId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200':
+          description: Resultado persistido da consulta. Nunca reaplica movimentações.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '400':
+          description: Identificador ou parâmetros inválidos (invalid_request); cursor inválido, de outra carteira ou além da versão atual (invalid_cursor).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transação não visível (transaction_not_found) ou carteira inexistente (wallet_not_found), conforme a rota.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: Banco ou autenticação indisponível; timeout ou cancelamento. Códigos service_unavailable e authentication_unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /providers/{providerId}/wagering/transactions/{externalTransactionId}:
+    get:
+      operationId: findExternalTransaction
+      summary: Consulta uma transação pelo ID externo
+      description: Exige wagering:read para o provedor vinculado ou wallets:read para o serviço interno. ProviderId de outro provedor retorna 403 antes da busca. Consulta sempre pelo par providerId/externalTransactionId.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: providerId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+        - name: externalTransactionId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200':
+          description: Resultado persistido da consulta. Nunca reaplica movimentações.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '400':
+          description: Identificador ou parâmetros inválidos (invalid_request); cursor inválido, de outra carteira ou além da versão atual (invalid_cursor).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transação não visível (transaction_not_found) ou carteira inexistente (wallet_not_found), conforme a rota.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: Banco ou autenticação indisponível; timeout ou cancelamento. Códigos service_unavailable e authentication_unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /wallets/{walletId}/ledger:
+    get:
+      operationId: listLedger
+      summary: Consulta o extrato paginado da carteira
+      description: Exige serviço interno com wallets:read. Ordena por walletVersion e ID do lançamento, crescentes. A primeira página fixa snapshotVersion; o cursor opaco preserva esse limite nas páginas seguintes, excluindo novas movimentações. Inclui OPENING; LOSS e rejeições não criam ledger. Sem offset. Cursor pertence à carteira e não substitui autorização. Limite padrão 50, máximo 100; parâmetros duplicados, desconhecidos ou inválidos retornam 400.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: walletId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+        - name: cursor
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 2048}
+          description: Use o nextCursor da página anterior sem interpretar ou modificar.
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        '200':
+          description: Resultado persistido da consulta. Nunca reaplica movimentações.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerPage'
+        '400':
+          description: Identificador ou parâmetros inválidos (invalid_request); cursor inválido, de outra carteira ou além da versão atual (invalid_cursor).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transação não visível (transaction_not_found) ou carteira inexistente (wallet_not_found), conforme a rota.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: Banco ou autenticação indisponível; timeout ou cancelamento. Códigos service_unavailable e authentication_unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /wallets/{walletId}/reconciliation:
+    post:
+      operationId: reconcileWallet
+      summary: Confere o saldo usando o ledger
+      description: Exige serviço interno com wallets:read. POST sem corpo ou parâmetros. Uma única visão consistente do PostgreSQL compara saldo e soma exata dos créditos menos débitos, incluindo OPENING. Difference é storedBalance menos calculatedBalance. Divergência retorna 200 com consistent=false, registra log e incrementa métrica; não altera carteira, ledger, transações ou eventos. Valores calculados usam strings decimais exatas, inclusive negativos e divergências além de int64.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: walletId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        '200':
+          description: Resultado persistido da consulta. Nunca reaplica movimentações.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reconciliation'
+        '400':
+          description: Identificador ou parâmetros inválidos (invalid_request); cursor inválido, de outra carteira ou além da versão atual (invalid_cursor).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transação não visível (transaction_not_found) ou carteira inexistente (wallet_not_found), conforme a rota.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: Banco ou autenticação indisponível; timeout ou cancelamento. Códigos service_unavailable e authentication_unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Consulta contadores de reconciliação
+      description: Exige serviço interno com wallets:read. Expõe jungle_reconciliation_checks_total e jungle_reconciliation_divergences_total em formato Prometheus. Contadores por processo, reiniciados com a instância, sem labels por carteira.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Contadores do processo.
+          content:
+            text/plain:
+              schema: {type: string}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/AuthenticationUnavailable'
   /health/live:
     get:
       operationId: getLiveness
@@ -152,6 +537,8 @@ components:
         Access token RS256 emitido pelo realm jungle, com audiência jungle-api.
         Rotas de carteira exigem também o cliente jungle-internal e o papel
         wallets:read ou wallets:write conforme a operação.
+        Consultas de transação exigem wagering:read para provedores; o serviço interno usa wallets:read.
+        BET/WIN/LOSS/REFUND/ROLLBACK exigem wagering:write e vínculo entre azp e providerId.
   responses:
     InvalidWalletRequest:
       description: |
@@ -165,7 +552,7 @@ components:
             $ref: '#/components/schemas/Error'
           example: {error: invalid_request}
     InternalError:
-      description: Falha interna; não informa sucesso sem confirmação da abertura.
+      description: Falha interna; não informa sucesso sem confirmação da operação.
       content:
         application/json:
           schema:
@@ -211,6 +598,205 @@ components:
             $ref: '#/components/schemas/Error'
           example: {error: authentication_unavailable}
   schemas:
+    Transaction:
+      type: object
+      additionalProperties: false
+      required: [transactionId, origin, kind, status, walletId, playerId, money, balance, walletVersion, createdAt, updatedAt]
+      description: Projeção de leitura. Não expõe chave de idempotência ou hash. Balance é o saldo observado na execução ou na última tentativa pendente, não o saldo atual da carteira.
+      properties:
+        transactionId: {type: string}
+        origin: {type: string, enum: [INTERNAL, EXTERNAL]}
+        kind: {type: string, enum: [OPENING, BET, WIN, LOSS, REFUND, ROLLBACK]}
+        status: {type: string, enum: [PROCESSED, REJECTED, PENDING_REFERENCE]}
+        providerId: {type: string}
+        externalTransactionId: {type: string}
+        walletId: {type: string}
+        playerId: {type: string}
+        roundId: {type: string}
+        gameId: {type: string}
+        money:
+          $ref: '#/components/schemas/Money'
+        balance:
+          $ref: '#/components/schemas/Money'
+        walletVersion: {type: integer, format: int64, minimum: 1}
+        failureCode: {type: string, description: Presente em rejeição definitiva.}
+        referenceExternalTransactionId: {type: string}
+        referenceTransactionId: {type: string}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    LedgerEntry:
+      type: object
+      additionalProperties: false
+      required: [id, walletId, transactionId, kind, direction, money, balanceBefore, balanceAfter, walletVersion, createdAt]
+      properties:
+        id: {type: string}
+        walletId: {type: string}
+        transactionId: {type: string}
+        kind: {type: string, enum: [OPENING, BET, WIN, REFUND, ROLLBACK]}
+        direction: {type: string, enum: [CREDIT, DEBIT]}
+        money:
+          $ref: '#/components/schemas/Money'
+        balanceBefore:
+          $ref: '#/components/schemas/Money'
+        balanceAfter:
+          $ref: '#/components/schemas/Money'
+        walletVersion: {type: integer, format: int64, minimum: 1}
+        createdAt: {type: string, format: date-time}
+    LedgerPage:
+      type: object
+      additionalProperties: false
+      required: [walletId, snapshotVersion, entries]
+      properties:
+        walletId: {type: string}
+        snapshotVersion: {type: integer, format: int64, minimum: 1}
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LedgerEntry'
+        nextCursor: {type: string, description: Ausente na última página.}
+    AuditMoney:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      description: Valor derivado exato em auditoria, inclusive negativo e além de int64 em divergências; nunca aceito como entrada financeira.
+      properties:
+        amount: {type: string, pattern: '^-?[0-9]+\.[0-9]{2}$'}
+        currency: {type: string, enum: [BRL, USD]}
+    Reconciliation:
+      type: object
+      additionalProperties: false
+      required: [walletId, storedBalance, calculatedBalance, difference, consistent, checkedEntries]
+      properties:
+        walletId: {type: string}
+        storedBalance:
+          $ref: '#/components/schemas/Money'
+        calculatedBalance:
+          $ref: '#/components/schemas/AuditMoney'
+        difference:
+          $ref: '#/components/schemas/AuditMoney'
+        consistent: {type: boolean}
+        checkedEntries: {type: integer, format: int64, minimum: 0}
+    BetRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money]
+      description: Identificadores não vazios, preservados sem trim e limitados a 256 bytes UTF-8.
+      properties:
+        providerId: {type: string, minLength: 1, maxLength: 256}
+        externalTransactionId: {type: string, minLength: 1, maxLength: 256}
+        playerId: {type: string, minLength: 1, maxLength: 256}
+        walletId: {type: string, minLength: 1, maxLength: 256}
+        roundId: {type: string, minLength: 1, maxLength: 256}
+        gameId: {type: string, minLength: 1, maxLength: 256}
+        kind: {type: string, enum: [BET]}
+        money:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Valor estritamente positivo, na moeda da carteira.
+    WinRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money]
+      properties:
+        providerId: {type: string, minLength: 1, maxLength: 256}
+        externalTransactionId: {type: string, minLength: 1, maxLength: 256}
+        playerId: {type: string, minLength: 1, maxLength: 256}
+        walletId: {type: string, minLength: 1, maxLength: 256}
+        roundId: {type: string, minLength: 1, maxLength: 256}
+        gameId: {type: string, minLength: 1, maxLength: 256}
+        kind: {type: string, enum: [WIN]}
+        money:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Crédito estritamente positivo na moeda da carteira, sem arredondamento.
+        referenceExternalTransactionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: ID externo de BET do mesmo provedor, carteira, jogador, moeda, rodada e jogo. Não aceita null, vazio ou autorreferência.
+    LossRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money]
+      description: LOSS registra o resultado sem movimentação financeira. Identificadores até 256 bytes UTF-8, não vazios.
+      properties:
+        providerId: {type: string, minLength: 1, maxLength: 256}
+        externalTransactionId: {type: string, minLength: 1, maxLength: 256}
+        playerId: {type: string, minLength: 1, maxLength: 256}
+        walletId: {type: string, minLength: 1, maxLength: 256}
+        roundId: {type: string, minLength: 1, maxLength: 256}
+        gameId: {type: string, minLength: 1, maxLength: 256}
+        kind: {type: string, enum: [LOSS]}
+        money:
+          type: object
+          additionalProperties: false
+          required: [amount, currency]
+          properties:
+            amount:
+              type: string
+              pattern: '^0+\.00$'
+              example: '0.00'
+              description: Exige zero com duas casas; zeros à esquerda são normalizados antes do hash.
+            currency:
+              type: string
+              enum: [BRL, USD]
+              description: Deve ser igual à moeda da carteira.
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money, referenceExternalTransactionId]
+      properties:
+        providerId: {type: string, minLength: 1, maxLength: 256}
+        externalTransactionId: {type: string, minLength: 1, maxLength: 256}
+        playerId: {type: string, minLength: 1, maxLength: 256}
+        walletId: {type: string, minLength: 1, maxLength: 256}
+        roundId: {type: string, minLength: 1, maxLength: 256}
+        gameId: {type: string, minLength: 1, maxLength: 256}
+        kind: {type: string, enum: [REFUND]}
+        money:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Positivo e exatamente igual ao valor da BET referenciada; não aceita devolução parcial.
+        referenceExternalTransactionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Obrigatório. BET do mesmo provedor, jogador, carteira, moeda, rodada e jogo.
+    RollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money, referenceExternalTransactionId]
+      properties:
+        providerId: {type: string, minLength: 1, maxLength: 256}
+        externalTransactionId: {type: string, minLength: 1, maxLength: 256}
+        playerId: {type: string, minLength: 1, maxLength: 256}
+        walletId: {type: string, minLength: 1, maxLength: 256}
+        roundId: {type: string, minLength: 1, maxLength: 256}
+        gameId: {type: string, minLength: 1, maxLength: 256}
+        kind: {type: string, enum: [ROLLBACK]}
+        money:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          description: Positivo e exatamente igual ao valor da operação referenciada; não aceita devolução parcial.
+        referenceExternalTransactionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Obrigatório. BET, WIN ou REFUND do mesmo provedor, jogador, carteira, moeda, rodada e jogo.
+    BetResult:
+      type: object
+      additionalProperties: false
+      required: [transactionId, status, balance, idempotentReplay]
+      properties:
+        transactionId: {type: string}
+        status: {type: string, enum: [PROCESSED, REJECTED, PENDING_REFERENCE]}
+        balance:
+          $ref: '#/components/schemas/Money'
+        failureCode:
+          type: string
+          enum: [INSUFFICIENT_FUNDS, BALANCE_OVERFLOW, REFERENCE_MISMATCH, REFERENCE_REJECTED, REFERENCE_NOT_FOUND, REFERENCE_AMOUNT_MISMATCH, ALREADY_REVERSED, REVERSAL_INSUFFICIENT_FUNDS]
+          description: Presente somente quando status=REJECTED.
+        idempotentReplay: {type: boolean}
     Money:
       type: object
       additionalProperties: false

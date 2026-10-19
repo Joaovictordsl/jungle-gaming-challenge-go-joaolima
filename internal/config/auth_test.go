@@ -8,7 +8,7 @@ import (
 )
 
 func TestAuthConfigurationDefaultsAndOverrides(t *testing.T) {
-	for _, key := range []string{"OIDC_ISSUER_URL", "OIDC_AUDIENCE", "OIDC_INTERNAL_CLIENT_ID", "OIDC_HTTP_TIMEOUT"} {
+	for _, key := range []string{"OIDC_ISSUER_URL", "OIDC_AUDIENCE", "OIDC_INTERNAL_CLIENT_ID", "OIDC_HTTP_TIMEOUT", "OIDC_PROVIDER_CLIENTS"} {
 		t.Setenv(key, "")
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
@@ -35,6 +35,8 @@ func TestAuthConfigurationRejectsInvalidValues(t *testing.T) {
 		{"OIDC_ISSUER_URL", "https://idp.example/realm?token=secret"}, {"OIDC_ISSUER_URL", "https://idp.example/realm#fragment"},
 		{"OIDC_AUDIENCE", ""}, {"OIDC_AUDIENCE", "bad audience"}, {"OIDC_AUDIENCE", "bad\"audience"},
 		{"OIDC_INTERNAL_CLIENT_ID", ""}, {"OIDC_HTTP_TIMEOUT", "0s"}, {"OIDC_HTTP_TIMEOUT", "-1s"}, {"OIDC_HTTP_TIMEOUT", "invalid"},
+		{"OIDC_PROVIDER_CLIENTS", `null`}, {"OIDC_PROVIDER_CLIENTS", `[]`}, {"OIDC_PROVIDER_CLIENTS", `{"jungle-internal":"provider-a"}`},
+		{"OIDC_PROVIDER_CLIENTS", `{"":"provider-a"}`}, {"OIDC_PROVIDER_CLIENTS", `{"client":" "}`},
 	} {
 		t.Run(tc.key+tc.value, func(t *testing.T) {
 			t.Setenv("OIDC_ISSUER_URL", "http://localhost:8081/realms/jungle")

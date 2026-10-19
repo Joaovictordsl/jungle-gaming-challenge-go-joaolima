@@ -33,14 +33,20 @@ type envelope[T any] struct {
 }
 
 type openingProcessedData struct {
-	TransactionID string      `json:"transactionId"`
-	WalletID      string      `json:"walletId"`
-	PlayerID      string      `json:"playerId"`
-	Kind          string      `json:"kind"`
-	Status        string      `json:"status"`
-	Money         money.Money `json:"money"`
-	Balance       money.Money `json:"balance"`
-	WalletVersion int64       `json:"walletVersion"`
+	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId,omitempty"`
+	ReferenceTransactionID         string      `json:"referenceTransactionId,omitempty"`
+	ProviderID                     string      `json:"providerId,omitempty"`
+	ExternalTransactionID          string      `json:"externalTransactionId,omitempty"`
+	RoundID                        string      `json:"roundId,omitempty"`
+	GameID                         string      `json:"gameId,omitempty"`
+	TransactionID                  string      `json:"transactionId"`
+	WalletID                       string      `json:"walletId"`
+	PlayerID                       string      `json:"playerId"`
+	Kind                           string      `json:"kind"`
+	Status                         string      `json:"status"`
+	Money                          money.Money `json:"money"`
+	Balance                        money.Money `json:"balance"`
+	WalletVersion                  int64       `json:"walletVersion"`
 }
 
 type walletBalanceChangedData struct {

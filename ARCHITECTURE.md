@@ -94,7 +94,9 @@ A primeira migration cria `wallets` com saldo em `BIGINT`, moeda suportada,
 versão positiva, timestamps obrigatórios, IDs preenchidos e unicidade de
 `(player_id, currency)`. A segunda cria `wager_transactions`, `wallet_ledger_entries`
 e `outbox_events` para a abertura interna. Os comandos de aplicação e reversão
-estão no `README.md`.
+estão no `README.md`. A terceira amplia o schema para `BET` externo e a quarta
+acrescenta `WIN` e referências; a quinta inclui LOSS e a sexta inclui REFUND e a sétima inclui ROLLBACK, preservando as migrations anteriores. Reversões
+recusam remover o histórico financeiro introduzido pela respectiva migration.
 
 ## Conexões, composição e ciclo de vida
 
@@ -205,6 +207,9 @@ Nesta migration, `wager_transactions` admite somente `INTERNAL/OPENING`, sem
 campos externos inaplicáveis. A ampliação para os cinco tipos externos e suas
 transições exigirá uma nova migration e os respectivos modelos. A proteção de
 registros terminais também deverá acompanhar essa evolução.
+
+A terceira migration acrescenta a origem `EXTERNAL/BET`, descrita abaixo, e mantém
+a proteção de imutabilidade para todos os registros terminais.
 
 O Fx fornece `OpeningStore`, gerador de IDs, relógio e `OpenWallet`. Testes de
 integração de abertura usam schemas descartáveis para validar commits e falhas
@@ -342,14 +347,356 @@ algoritmo inseguro, claims inválidas, papéis/clientes incorretos, rotação, c
 realm do repositório, gera chaves exclusivas dos testes e não é publicado.
 Os testes de Keycloak real verificam interoperabilidade com a implantação local.
 
+## BET: processamento síncrono e idempotência
+
+`POST /wagering/transactions` aceita `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`. O middleware exige
+`wagering:write` e um vínculo explícito de `azp` para `providerId`, configurado em
+`OIDC_PROVIDER_CLIENTS`. O cliente interno é proibido nesse mapa. O handler compara
+o provedor do corpo com esse vínculo antes de consultar o resultado persistido.
+O bootstrap inclui `jungle-provider-a`, limitado ao papel externo; um script local
+acrescenta esse cliente a um realm já existente sem recriar dados ou alterar secrets.
+
+`ProcessBet` valida a entrada, fornece identidade e instante e chama o porto
+`BetStore`. O adapter PostgreSQL estabelece a transação SQL e chama a transição de
+domínio sob lock da carteira. O domínio não conhece HTTP, Fx ou PostgreSQL.
+`Bet` tem estado encapsulado e devolve novos valores. Sua máquina de estados atual é:
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> PROCESSED: débito positivo com saldo suficiente
+    PENDING --> REJECTED: INSUFFICIENT_FUNDS
+    PROCESSED --> [*]
+    REJECTED --> [*]
+```
+
+O `PENDING` existe somente em memória e dentro do processamento não confirmado.
+Não há commit intermediário de aceite. Um encerramento antes do commit permite
+rollback e retry; depois do commit, o resultado está persistido para replay.
+Não há pendência durável a ser retomada no fluxo de BET, que não usa referências.
+WIN com referência pode aguardar em `PENDING_REFERENCE`, conforme a seção abaixo.
+Os cinco tipos externos estão implementados. O registro de `FAILED` ainda será acrescentado.
+
+O hash é SHA-256 hexadecimal de um objeto JSON serializado por `encoding/json`,
+com chaves de mapas ordenadas em todos os níveis. Seus campos são `providerId`,
+`externalTransactionId`, `walletId`, `playerId`, `roundId`, `gameId`, `kind` (`BET`)
+e `money` (`amount` e `currency`). Todos os valores são strings; nenhum passa por
+float. `amount` usa `Money.Amount()`, que remove zeros à esquerda e mantém duas
+casas. Identificadores são preservados sem trim; a chave de idempotência, headers,
+IDs de mensagem e timestamps ficam fora do hash. O futuro consumidor SQS usará o
+mesmo `BetRequest` e `PayloadHash`.
+
+As constraints únicas são `(provider_id, idempotency_key)` e
+`(provider_id, external_transaction_id)`. Chave e hash equivalentes devolvem o
+registro terminal original; chave com hash diferente gera `idempotency_conflict`.
+O mesmo ID externo com outra chave gera `external_transaction_conflict`, inclusive
+quando seu conteúdo financeiro é igual. Essa escolha conserva a identidade da
+chave original e impede aliases silenciosos. Chaves de provedores distintos não
+colidem. O replay usa o saldo, versão, código e instante persistidos da operação,
+sem consultar o saldo atual para recompor a resposta e sem emitir novos eventos.
+
+Cada tentativa usa `READ COMMITTED`, com limite de 5 segundos incluindo espera no
+pool, lock e commit. Primeiro consulta um replay; se ausente, adquire
+`SELECT ... FOR UPDATE` somente na carteira envolvida e repete a consulta após a
+espera. O lock serializa débitos da mesma carteira. O `UPDATE` também verifica a
+versão anterior. Carteiras distintas não compartilham locks locais ou globais.
+Se chaves iguais concorrem em carteiras diferentes, `INSERT ON CONFLICT DO NOTHING`
+aguarda a constraint única e lê o vencedor em uma nova consulta antes de atualizar
+qualquer saldo. Não utiliza snapshots antigos de `REPEATABLE READ` nesse caminho.
+
+Uma aprovação debita por `Wallet.Debit`, incrementa a versão uma vez e confirma
+resultado terminal, carteira, um ledger `DEBIT` e os eventos concretos
+`WagerTransactionProcessed` e `WalletBalanceChanged` na mesma transação. Uma
+rejeição por saldo insuficiente grava `REJECTED` e `WagerTransactionRejected`,
+preservando saldo e versão, sem ledger. Ambos são imutáveis, inclusive em replays.
+IDs de eventos derivam do ID da transação e os snapshots financeiros usam strings.
+O fluxo não publica eventos; eles permanecem na outbox para o futuro publisher.
+
+O schema distingue a forma de `OPENING` e `BET`, preserva FKs de jogador/moeda,
+impõe equação de débito e saldo não negativo, unicidade de lançamento e de versão
+financeira processada por carteira. Triggers adiadas exigem os registros de ledger
+e outbox no commit e impedem mudanças de saldo/versão sem a transação e o ledger
+correspondentes. Uma rejeição não pode receber um lançamento posteriormente.
+As proteções de UPDATE/DELETE/TRUNCATE continuam válidas para ledger e transações.
+
+JSON inválido, valor zero, outros tipos ou carteira incompatível com jogador/moeda
+são entradas corrigíveis (`400`) sem aceite. Carteira inexistente retorna `404`.
+A rejeição financeira persistida retorna `422` com `INSUFFICIENT_FUNDS`, inclusive
+no replay. Conflitos retornam `409`; falhas transitórias, `503`; falhas internas,
+`500`. Rollback usa contexto independente. Comunicação interrompida durante commit
+pode deixar o resultado incerto: o provedor deve repetir a mesma chave e conteúdo.
+
+Testes verificam rollback no ledger, segundo evento e commit, conflitos entre
+carteiras, progresso de uma carteira enquanto outra está bloqueada e cancelamento.
+Três processos do sistema operacional, com pools e memória independentes, disputam
+duas apostas de 80.00 sobre saldo de 100.00 (incluindo uma duplicata). O resultado
+é uma aprovação, uma rejeição, um débito e saldo 20.00. Outros três processos novos
+verificam os resultados persistidos após a saída dos anteriores. A API completa
+também é testada com PostgreSQL e Keycloak reais; a simulação OIDC cobre vínculo
+de provedor, papel ausente e proibição de acesso às rotas internas.
+
+## WIN: crédito e referência opcional
+
+`Wallet.Credit` valida o agregado, a moeda, o valor positivo, o instante e os limites
+de saldo/versão antes de devolver uma nova carteira. Usa `Money.Add`, sem floats.
+`Win` encapsula metadados, referência resolvida e resultado; criação e reidratação
+são separadas. `ProcessWin` coordena as dependências e `WinStore` estabelece a
+transação SQL, compartilhando com BET as constraints de chave e ID externo.
+O hash inclui `kind: WIN` e `referenceExternalTransactionId` somente quando presente.
+Nenhum hash de BET já persistido foi alterado. Trocar BET por WIN com a mesma chave
+é conflito; uma mudança de referência também muda o hash.
+
+Sem referência, WIN credita de forma síncrona. Com referência, resolve por
+`(provider_id, external_transaction_id)` e exige uma BET processada do mesmo
+jogador, carteira, moeda, rodada e jogo. O prêmio não precisa igualar o valor
+apostado. Referência incompatível produz `REFERENCE_MISMATCH`; BET rejeitada produz
+`REFERENCE_REJECTED`. Uma referência de outro provedor é indistinguível de uma
+referência ausente, preservando o isolamento entre provedores. A FK composta da
+referência interna também impõe o provedor. Null, string vazia e autorreferência
+são entradas inválidas; ausência do campo significa WIN sem dependência.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> PROCESSED: crédito válido
+    PENDING --> REJECTED: overflow ou referência inválida
+    PENDING --> PENDING_REFERENCE: referência ausente ou pendente
+    PENDING_REFERENCE --> PENDING_REFERENCE: retry com backoff
+    PENDING_REFERENCE --> PROCESSED: BET processada e crédito válido
+    PENDING_REFERENCE --> REJECTED: referência inválida, overflow ou esgotamento
+    PROCESSED --> [*]
+    REJECTED --> [*]
+```
+
+O crédito confirma resultado terminal, saldo, versão, ledger CREDIT e os dois
+eventos de processamento/mudança de saldo no mesmo commit. Overflow retorna uma
+rejeição auditável `BALANCE_OVERFLOW`, com saldo/versão preservados e somente o
+evento de rejeição. Essa decisão terminal não muda se uma aposta posterior reduzir
+o saldo. Constraints verificam a equação de crédito com `NUMERIC` somente na
+verificação, mantendo dinheiro em BIGINT. O índice de versão processada por carteira
+e a proteção das movimentações também abrangem WIN.
+
+Referência ainda indisponível confirma `PENDING_REFERENCE` e um snapshot concreto
+`WagerTransactionPendingReference`, sem ledger ou alteração na carteira. O HTTP
+retorna `202`; o saldo é apenas o observado na última tentativa. O mesmo POST com
+chave/conteúdo originais permite acompanhar o status. Quando concluído, devolve
+o resultado persistido e terminal com `idempotentReplay: true`. Consultas dedicadas de transações também estão disponíveis por GET. Os eventos permanecem na outbox; o publisher
+SQS não faz parte desta etapa.
+
+`ReferenceWorker` pertence a um módulo Fx, inicia depois do pool e encerra antes
+dele. O HTTP deixa de receber requisições antes do encerramento do worker. Seu loop
+consulta trabalho imediatamente e, sem trabalho, aguarda 1s. Após cada pendência
+tratada procura a próxima; falhas de infraestrutura aguardam 1s antes de tentar de
+novo. Todas as operações recebem contexto e têm limite SQL de 5s; SIGTERM cancela
+o trabalho e aguarda a saída observável da goroutine. O rollback tem prazo próprio.
+
+Cada retomada seleciona uma linha vencida com `FOR UPDATE SKIP LOCKED` e bloqueia
+a carteira depois. Outros workers podem tratar outras linhas; nenhum mutex local
+ou lock global participa da garantia. O trabalho permanece bloqueado apenas na
+transação, evitando necessidade de lease: uma queda libera o lock e permite outra
+instância retomar a linha cujo prazo já venceu. Replays leem snapshots sem bloquear
+a pendência e nunca reaplicam o crédito.
+
+Tentativas, próximo instante e deadline ficam no banco. A primeira tentativa é
+agendada para 1s depois do registro; o backoff posterior é 2s, 4s, 8s, 16s, 30s,
+30s... Há máximo de 8 tentativas confirmadas e TTL de 5 minutos. Uma referência
+válida encontrada na retomada é processada; se continuar indisponível ao esgotar
+um limite, grava `REJECTED/REFERENCE_NOT_FOUND` e o evento correspondente.
+Falhas de banco revertem o incremento e os efeitos, preservando o trabalho para
+retry. Uma referência encontrada mas ainda pendente segue a mesma política.
+
+Somente pendências podem sofrer UPDATE, com metadados de negócio imutáveis,
+tentativas incrementais e transição validada. Terminais, ledger e snapshots da
+outbox continuam protegidos contra edição/exclusão/truncate. O evento inicial de
+pendência é preservado quando a operação termina; a retomada acrescenta eventos
+terminais com IDs derivados da mesma identidade, sem duplicar o evento de espera.
+Triggers adiadas exigem o conjunto de ledger/outbox adequado ao estado final.
+O down da quarta migration recusa reverter quando há histórico WIN, inclusive pendências.
+
+Os testes cobrem crédito, overflow, referências incompatíveis/rejeitadas, espera,
+backoff, TTL, esgotamento, retomada por stores independentes, disputa entre workers,
+rollback e ciclo up/down/up. A composição completa com PostgreSQL e Keycloak reais
+prova que um WIN recebido antes da BET passa de 202 a 200 pelo worker. Três processos
+também disputam um crédito, um débito e uma duplicata sem lost updates; novos processos
+verificam os mesmos resultados persistidos.
+
+## LOSS: resultado sem movimentação
+
+`LossRequest` valida os mesmos identificadores externos e dinheiro inicializado,
+mas exige zero. A moeda continua obrigatória e deve coincidir com a carteira.
+Referências não são aceitas para esse tipo. Valores equivalentes, como `0000.00`,
+são normalizados para `0.00` no hash SHA-256. O hash inclui `kind: LOSS`, todos os
+metadados de negócio e a moeda, excluindo a chave e os metadados de transporte.
+As regras positivas de BET/WIN e seus hashes persistidos permanecem preservados.
+
+`Loss` encapsula a transição `PENDING -> PROCESSED`, sem estados intermediários
+confirmados. `ProcessLoss` coordena identidade, relógio e persistência. `LossStore`
+usa READ COMMITTED, limite de 5s e o mesmo padrão de consulta de replay, lock por
+carteira, nova consulta e unicidade no INSERT. O lock garante que o saldo/versão
+observados correspondam a um ponto coerente entre BETs/WINs concorrentes. Não chama
+`Wallet.Debit`/`Credit` e não executa UPDATE na carteira: até seus timestamps ficam
+inalterados. Uma falha antes do commit reverte o resultado e o evento juntos.
+
+Um LOSS confirma somente a transação terminal e `WagerTransactionProcessed`, com
+Money zero e o snapshot do saldo/versão. Não há ledger nem `WalletBalanceChanged`.
+O HTTP retorna 200, e replays recuperam o mesmo resultado original, mesmo que a
+carteira já tenha outra versão/saldo. As constraints únicas de chave e ID externo
+são compartilhadas entre BET/WIN/LOSS; o provedor autorizado é decidido antes de
+qualquer replay. Um LOSS não é referência válida para WIN: esse uso gera a rejeição
+auditável `REFERENCE_MISMATCH`, sem crédito.
+
+A quinta migration permite zero em `wager_transactions` somente para LOSS, que
+deve estar PROCESSED, sem falha/referência e com saldos anterior/posterior iguais.
+A unicidade da versão financeira é limitada a BET/WIN, permitindo vários LOSS na
+mesma versão. FKs preservam jogador/carteira/moeda; constraints e triggers impedem
+ledger para LOSS e exigem exatamente o evento de processamento no commit. Um
+trigger de inserção na outbox também impede acrescentar posteriormente um evento
+de mudança de saldo para LOSS. Transações terminais e snapshots permanecem imutáveis.
+O down recusa remover qualquer histórico LOSS; novas correções exigem migrations.
+
+Testes de domínio e HTTP cobrem zero, moeda, valores inválidos, transições e
+contrato. PostgreSQL real verifica 50 duplicatas concorrentes, rollback na outbox
+e no commit, múltiplos LOSS na mesma versão e preservação dos timestamps. A API
+com Keycloak real verifica autorização, replay do saldo original após BET e retry
+após rollback. Três processos independentes disputam LOSS/BET/duplicata; processos
+novos consultam os mesmos snapshots sem efeitos adicionais.
+
+## REFUND: devolução integral de uma aposta
+
+`ProcessRefund` recebe referência obrigatória e valor positivo. `RefundRequest`
+participa do mesmo espaço de idempotência por provedor, mas seu hash inclui
+`kind: REFUND`; hashes existentes de BET, WIN e LOSS são preservados. A resolução
+usa `(providerId, referenceExternalTransactionId)` e exige uma BET processada com
+os mesmos jogador, carteira, moeda, rodada e jogo. O valor deve coincidir
+integralmente com o da BET; diferença gera `REFERENCE_AMOUNT_MISMATCH`.
+
+WIN e REFUND compartilham `ReferencedTransaction`, com tipo privado fixado pelo
+construtor. As entradas específicas e os métodos públicos do store validam o tipo.
+O store compartilhado mantém o protocolo de replay, lock da carteira, nova consulta
+de replay, resolução de referência, decisão do domínio e commit de todos os efeitos.
+REFUND credita saldo, incrementa versão e registra ledger CREDIT, evento de
+processamento e mudança de saldo na outbox; rejeição registra somente seu evento.
+As referências pendentes usam o mesmo worker durável de WIN, com SKIP LOCKED,
+backoff, 8 tentativas e TTL de 5 minutos. O worker revalida também a duplicidade.
+
+Após obter o lock da carteira, o store procura uma reversão processada da BET.
+Outra devolução resulta em `REJECTED/ALREADY_REVERSED`; replay da mesma chave é
+resolvido antes e conserva o resultado original. A sexta migration cria uma
+unicidade parcial por `reference_transaction_id` para REFUND e ROLLBACK
+processados. Essa é a política explícita da combinação: a mesma BET pode ter
+somente uma devolução confirmada, independentemente do tipo de reversão. Não há
+reabertura de uma devolução anterior ou edição de histórico. ROLLBACK
+de REFUND debita em uma nova operação que referencia o próprio REFUND.
+ROLLBACK já é aceito pela API.
+
+A migration amplia as verificações de crédito e referência para REFUND, exige
+referência não nula e compara o valor com a BET no commit. A unicidade por versão
+inclui REFUND e continua excluindo LOSS. O down recusa qualquer histórico REFUND,
+inclusive pendências. Testes verificam o ciclo up/down/up preservando resultados
+e hashes antigos, falhas da outbox/commit, expiração e dois workers concorrentes.
+Três processos independentes confirmam que duas operações para a mesma BET geram
+um crédito e uma rejeição, com uma duplicata reconhecida como replay. A API e o
+worker também são exercitados com Keycloak e PostgreSQL reais.
+
+## ROLLBACK: movimento inverso e saldo disponível
+
+`ProcessRollback` exige referência externa e valor positivo integral. A direção
+vem da referência resolvida: BET implica CREDIT; WIN e REFUND implicam DEBIT.
+A direção não é recebida no contrato HTTP nem participa do hash. O hash usa os
+mesmos campos canônicos com `kind: ROLLBACK`, preservando hashes anteriores.
+`ReferencedTransaction` compartilha as transições e os métodos de observação com
+WIN/REFUND; mantém o tipo e a direção encapsulados. O método `Apply` confere a
+referência e chama `Wallet.Credit` ou `Wallet.Debit`, preservando não negatividade,
+controle de versão e timestamps. Referências a LOSS e ROLLBACK são incompatíveis.
+
+Insuficiência para desfazer um crédito produz a rejeição terminal
+`REVERSAL_INSUFFICIENT_FUNDS`, distinta do código de BET. A rejeição é auditada na
+outbox e não cria ledger nem reserva uma reversão bem-sucedida. Replay preserva
+o resultado observado; para tentar novamente após novo saldo, o provedor precisa
+de uma operação nova. As demais rejeições usam os códigos compartilhados de
+referência, valor integral, duplicidade e overflow de crédito.
+
+O store usa o mesmo lock da carteira, rechecagem de replay e transação SQL das
+operações referenciadas. A referência terminal é imutável: na reidratação a direção
+é recuperada dessa referência, sem recalcular ou reaplicar movimentações. O worker
+inclui ROLLBACK no processamento com SKIP LOCKED, backoff, 8 tentativas e TTL de
+5 minutos. Se o crédito referenciado ainda aguarda outra referência, o estorno
+também espera. Quando a dependência termina sem sucesso, o estorno é rejeitado.
+
+A sétima migration amplia as constraints e a unicidade por versão financeira.
+O guard do ledger verifica direção e snapshots; um novo trigger diferido exige
+referência processada, metadados e valor iguais, equação inversa à referência,
+ledger e eventos correspondentes no commit. A unicidade de reversão da sexta
+migration é compartilhada por REFUND/ROLLBACK. Desfazer REFUND não apaga nem libera
+uma devolução anterior da BET. O down recusa qualquer histórico de ROLLBACK.
+
+A verificação inclui SQL tentando creditar ao desfazer WIN, com ledger e eventos
+completos: o banco recusa o commit e preserva saldo e histórico. Há testes da API
+com Keycloak/PostgreSQL reais, retomada de referência, atomicidade de falhas,
+replay durável e disputa entre REFUND/ROLLBACK/duplicata em três processos.
+
+## Consultas, paginação e reconciliação
+
+`application/query.Service` coordena consultas por uma porta `Store`, sem métodos
+de gravação. `postgres.ReadStore` usa projeções SQL e reconstrói Money e entradas
+do ledger, sem acionar métodos de transição, ledger novo ou outbox. A projeção de
+transação inclui OPENING e todos os tipos externos, seus resultados persistidos,
+referências, rejeições e instantes UTC. Não revela chave de idempotência ou hash.
+`GET` permite acompanhar pendências sem repetir o comando original.
+
+`RequireTransactionRead` resolve o escopo a partir da identidade OIDC. Serviço
+interno com `wallets:read` consulta qualquer origem; provedor vinculado precisa de
+`wagering:read` e seu ID compõe o WHERE da busca por ID interno. Operação de outra
+origem retorna 404 sem revelar existência. Na rota por ID externo, escopo e
+providerId precisam coincidir antes do I/O; caso contrário, 403. Extrato,
+reconciliação e métricas permanecem restritos ao serviço interno. O realm e o
+script de configuração local definem leitura e escrita separadamente.
+
+A paginação é por chave `(walletVersion, ledgerId)` crescente. Versão financeira
+é uma ordem de confirmação por carteira, inclusive quando timestamps coincidem;
+LOSS não a incrementa e não possui ledger. A primeira página lê a carteira e os
+lançamentos em REPEATABLE READ/READ ONLY, fixando a versão superior. Páginas
+seguintes consultam posição posterior ao último item e versão até esse limite.
+Isso exclui novos commits de uma navegação já iniciada, sem locks em escritores
+ou transações abertas entre requisições. Busca-se limit+1 para decidir nextCursor.
+A oitava migration indexa transações financeiras por carteira e versão.
+
+O cursor Base64URL carrega versão do formato, carteira, versão superior e posição.
+É uma posição opaca, não uma autorização ou assinatura; o servidor sempre aplica
+a autorização da rota e confere carteira, limites, JSON canônico e tamanho. A
+ordem dos parâmetros não altera a consulta, mas duplicados, desconhecidos e
+valores inválidos são rejeitados. O padrão é 50 e o máximo é 100 entradas.
+
+A reconciliação usa uma única instrução SQL que agrega ledger e carteira no mesmo
+snapshot MVCC, sem locks explícitos e sem mutações. SUM usa NUMERIC exato; a
+aplicação deriva diferença com math/big.Int, sem float. Os valores de auditoria
+são decimais em strings e podem extrapolar int64 para reportar corrupção; Money
+continua limitado a int64 nas movimentações. Diferença é stored minus calculated.
+Abertura positiva entra no cálculo; carteira inicialmente zero começa sem ledger.
+
+Reconciliação divergente retorna consistent=false, gera log com walletId e número
+de lançamentos, sem valores financeiros, e incrementa contador atômico de
+divergências. Contador de verificações concluídas e divergências são expostos por
+GET /metrics em formato Prometheus, com autorização interna e sem labels de alta
+cardinalidade. Contadores pertencem à instância e reiniciam com o processo.
+
+Os testes usam schemas descartáveis para comprovar leitura sem efeitos, escopo de
+provedor, paginação com commits entre páginas, soma exata, snapshot consistente
+sob escritores concorrentes e detecção de corrupção sem correção. A API real é
+exercitada com Keycloak/PostgreSQL; a simulação OIDC cobre permissões separadas.
+
 ## Escopo atual
 
 O domínio implementa `Money`, criação e reidratação de `Wallet`, abertura interna
-e lançamentos de ledger. O ambiente local inclui PostgreSQL, duas migrations e
+e lançamentos de ledger. O ambiente local inclui PostgreSQL, oito migrations e
 ciclo de vida Fx. O repositório possui `Create` e `FindByID`, e a abertura grava
-seus registros financeiros atomicamente com a outbox. Débitos/créditos de apostas,
-transações externas, rotas HTTP de apostas e consultas financeiras, readiness, SQS, inbox,
-publisher e reconciliação ainda serão implementados. O servidor Gin e a rota de
+seus registros financeiros atomicamente com a outbox. BET debita e WIN credita,
+com resultados externos, referência opcional, worker de retomada e rota HTTP com
+idempotência persistente. LOSS registra o resultado sem movimentação e REFUND
+devolve integralmente uma BET, com referência obrigatória e proteção de duplicidade.
+ROLLBACK desfaz integralmente BET, WIN ou REFUND por uma nova movimentação.
+Consultas de transações, extrato com cursor e reconciliação estão implementados.
+Readiness, SQS, inbox, publisher e métricas dos demais fluxos ainda serão implementados. O servidor Gin e a rota de
 liveness já estão integrados ao ciclo de vida da aplicação. O Keycloak local emite
 tokens do serviço interno com configuração reproduzível pelo Compose, e o
 middleware JWT/OIDC já está integrado ao Fx. A abertura e a consulta de carteiras

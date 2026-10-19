@@ -25,6 +25,10 @@ function token(kind) {
   if (kind === 'wrong-issuer') claims.iss = 'https://other.example/realms/jungle';
   if (kind === 'wrong-audience') claims.aud = 'other-api';
   if (kind === 'other-client') claims.azp = 'provider-a';
+  if (['provider-a', 'provider-b', 'provider-no-role', 'unknown-provider', 'provider-read-only', 'provider-write-only'].includes(kind)) {
+    claims.azp = kind === 'provider-b' ? 'jungle-provider-b' : kind === 'unknown-provider' ? 'unregistered-provider' : 'jungle-provider-a';
+    claims.resource_access['jungle-api'].roles = kind === 'provider-no-role' ? [] : kind === 'provider-read-only' ? ['wagering:read'] : kind === 'provider-write-only' ? ['wagering:write'] : ['wagering:write', 'wagering:read'];
+  }
   if (kind === 'read-only') claims.resource_access['jungle-api'].roles = ['wallets:read'];
   if (kind === 'wrong-role-audience') claims.resource_access = { 'other-api': { roles: ['wallets:write'] } };
   if (kind === 'realm-role') { claims.resource_access = {}; claims.realm_access = { roles: ['wallets:write'] }; }

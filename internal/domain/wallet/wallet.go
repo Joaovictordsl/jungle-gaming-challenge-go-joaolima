@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -117,4 +118,61 @@ func (w Wallet) CreatedAt() time.Time {
 
 func (w Wallet) UpdatedAt() time.Time {
 	return w.updatedAt
+}
+
+// Debit devolve um novo estado; persistência e ledger pertencem à mesma transação SQL.
+func (w Wallet) Debit(amount money.Money, at time.Time) (Wallet, error) {
+	if err := w.Validate(); err != nil {
+		return Wallet{}, err
+	}
+	if err := amount.Validate(); err != nil {
+		return Wallet{}, err
+	}
+	if amount.MinorUnits() <= 0 {
+		return Wallet{}, ErrInvalidMovement
+	}
+	if at.IsZero() || at.Before(w.updatedAt) {
+		return Wallet{}, ErrInvalidTime
+	}
+	comparison, err := w.balance.Compare(amount)
+	if err != nil {
+		return Wallet{}, err
+	}
+	if comparison < 0 {
+		return Wallet{}, ErrInsufficientFunds
+	}
+	if w.version == math.MaxInt64 {
+		return Wallet{}, ErrInvalidVersion
+	}
+	balance, err := w.balance.Subtract(amount)
+	if err != nil {
+		return Wallet{}, err
+	}
+	w.balance, w.version, w.updatedAt = balance, w.version+1, at.UTC()
+	return w, nil
+}
+
+// Credit devolve um novo estado e verifica overflow antes de alterar saldo e versão.
+func (w Wallet) Credit(amount money.Money, at time.Time) (Wallet, error) {
+	if err := w.Validate(); err != nil {
+		return Wallet{}, err
+	}
+	if err := amount.Validate(); err != nil {
+		return Wallet{}, err
+	}
+	if amount.MinorUnits() <= 0 {
+		return Wallet{}, ErrInvalidMovement
+	}
+	if at.IsZero() || at.Before(w.updatedAt) {
+		return Wallet{}, ErrInvalidTime
+	}
+	balance, err := w.balance.Add(amount)
+	if err != nil {
+		return Wallet{}, err
+	}
+	if w.version == math.MaxInt64 {
+		return Wallet{}, ErrInvalidVersion
+	}
+	w.balance, w.version, w.updatedAt = balance, w.version+1, at.UTC()
+	return w, nil
 }

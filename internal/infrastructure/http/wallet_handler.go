@@ -157,6 +157,14 @@ func decodeWalletRequest(body []byte) (playerID, amount, currency string, err er
 }
 
 func walletJSONObject(body []byte, allowed ...string) (map[string]json.RawMessage, error) {
+	return walletJSONFields(body, allowed, nil)
+}
+
+func walletJSONFields(body []byte, required, optional []string) (map[string]json.RawMessage, error) {
+	allowed := append(append([]string{}, required...), optional...)
+	if !utf8.Valid(body) {
+		return nil, errInvalidWalletJSON
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	start, err := decoder.Token()
 	if err != nil || start != json.Delim('{') {
@@ -189,8 +197,13 @@ func walletJSONObject(body []byte, allowed ...string) (map[string]json.RawMessag
 		fields[key] = value
 	}
 	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || len(fields) != len(allowed) {
+	if err != nil || end != json.Delim('}') {
 		return nil, errInvalidWalletJSON
+	}
+	for _, key := range required {
+		if _, exists := fields[key]; !exists {
+			return nil, errInvalidWalletJSON
+		}
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

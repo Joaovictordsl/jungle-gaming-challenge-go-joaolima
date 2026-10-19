@@ -45,6 +45,7 @@ services:
       KC_HOSTNAME: http://localhost:8081
       KC_HEALTH_ENABLED: "true"
       KEYCLOAK_INTERNAL_CLIENT_SECRET: ${KEYCLOAK_INTERNAL_CLIENT_SECRET:-jungle_internal_local}
+      KEYCLOAK_PROVIDER_A_CLIENT_SECRET: ${KEYCLOAK_PROVIDER_A_CLIENT_SECRET:-jungle_provider_a_local}
     ports:
       - "127.0.0.1:8081:8080"
     volumes:

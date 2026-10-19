@@ -16,8 +16,10 @@ import (
 	"go.uber.org/fx"
 
 	"jungle-gaming-challenge-go-joaolima/internal/config"
+	"jungle-gaming-challenge-go-joaolima/internal/domain/wager"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wallet"
 	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/auth"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/metrics"
 )
 
 func httpTestApp(t *testing.T, cfg config.HTTP) (*fx.App, *Server, *gin.Engine) {
@@ -27,6 +29,16 @@ func httpTestApp(t *testing.T, cfg config.HTTP) (*fx.App, *Server, *gin.Engine) 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	application := fx.New(Module, fx.Supply(logger), fx.Replace(cfg),
 		fx.Supply(newHandlerTestOpener(handlerStoreFunc(func(context.Context, wallet.Wallet) error { return nil }))),
+		fx.Supply(testBetProcessor(func(context.Context, wager.Bet) (wager.Bet, bool, error) {
+			return wager.Bet{}, false, errors.New("apostas não participam do teste de lifecycle")
+		})),
+		fx.Supply(testWinProcessor(func(context.Context, wager.Win) (wager.Win, bool, error) {
+			return wager.Win{}, false, errors.New("WIN não participa do teste de lifecycle")
+		})),
+		fx.Supply(unusedLossProcessor()),
+		fx.Supply(unusedRefundProcessor()),
+		fx.Supply(unusedRollbackProcessor()),
+		fx.Supply(newTestQueries(), metrics.NewReconciliation()),
 		fx.Supply(fx.Annotate(handlerRepository{}, fx.As(new(wallet.Repository)))),
 		fx.Replace(fx.Annotate(tokenVerifierFunc(func(context.Context, string) (auth.Principal, error) {
 			return auth.Principal{}, auth.ErrInvalidToken

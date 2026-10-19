@@ -18,12 +18,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/fx"
 
+	"jungle-gaming-challenge-go-joaolima/internal/application/query"
+	applicationwager "jungle-gaming-challenge-go-joaolima/internal/application/wager"
 	applicationwallet "jungle-gaming-challenge-go-joaolima/internal/application/wallet"
 	"jungle-gaming-challenge-go-joaolima/internal/config"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/money"
+	"jungle-gaming-challenge-go-joaolima/internal/domain/wager"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wallet"
 	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/auth"
 	httpserver "jungle-gaming-challenge-go-joaolima/internal/infrastructure/http"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/metrics"
 )
 
 const mockURL = "http://127.0.0.1:4900/keycloak"
@@ -59,7 +63,67 @@ func simulatedToken(t *testing.T, client *http.Client, kind string) string {
 	return response.AccessToken
 }
 
-type walletPermissionProbe struct{ saves atomic.Int32 }
+type walletPermissionProbe struct {
+	saves atomic.Int32
+	bets  atomic.Int32
+}
+
+func (p *walletPermissionProbe) ProcessBet(_ context.Context, b wager.Bet) (wager.Bet, bool, error) {
+	p.bets.Add(1)
+	balance, _ := money.New("100.00", "BRL")
+	w, err := wallet.NewWallet(b.Request().WalletID, b.Request().PlayerID, balance, p.Now())
+	if err != nil {
+		return wager.Bet{}, false, err
+	}
+	completed, _, err := b.Apply(w, p.Now())
+	return completed, false, err
+}
+
+func (p *walletPermissionProbe) ProcessWin(_ context.Context, w wager.Win) (wager.Win, bool, error) {
+	p.bets.Add(1)
+	balance, _ := money.New("100.00", "BRL")
+	current, err := wallet.NewWallet(w.Request().WalletID, w.Request().PlayerID, balance, p.Now())
+	if err != nil {
+		return wager.Win{}, false, err
+	}
+	completed, _, err := w.Apply(current, nil, p.Now())
+	return completed, false, err
+}
+
+func (p *walletPermissionProbe) ProcessLoss(_ context.Context, l wager.Loss) (wager.Loss, bool, error) {
+	p.bets.Add(1)
+	balance, _ := money.New("100.00", "BRL")
+	current, err := wallet.NewWallet(l.Request().WalletID, l.Request().PlayerID, balance, p.Now())
+	if err != nil {
+		return wager.Loss{}, false, err
+	}
+	result, err := l.Process(current, p.Now())
+	return result, false, err
+}
+
+func (p *walletPermissionProbe) ProcessRefund(_ context.Context, r wager.Refund) (wager.Refund, bool, error) {
+	p.bets.Add(1)
+	balance, _ := money.New("100.00", "BRL")
+	current, err := wallet.NewWallet(r.Request().WalletID, r.Request().PlayerID, balance, p.Now())
+	if err != nil {
+		return wager.Refund{}, false, err
+	}
+	// Referência não disponível nesta fixture: prova a autorização e o aceite 202.
+	completed, _, err := r.Apply(current, nil, p.Now())
+	return completed, false, err
+}
+
+func (p *walletPermissionProbe) ProcessRollback(_ context.Context, r wager.Rollback) (wager.Rollback, bool, error) {
+	p.bets.Add(1)
+	balance, _ := money.New("100.00", "BRL")
+	current, err := wallet.NewWallet(r.Request().WalletID, r.Request().PlayerID, balance, p.Now())
+	if err != nil {
+		return wager.Rollback{}, false, err
+	}
+	// Referência não disponível nesta fixture: prova a autorização e o aceite 202.
+	completed, _, err := r.Apply(current, nil, p.Now())
+	return completed, false, err
+}
 
 func (p *walletPermissionProbe) SaveOpening(context.Context, wallet.Wallet) error {
 	p.saves.Add(1)
@@ -82,12 +146,35 @@ func (p *walletPermissionProbe) FindByID(_ context.Context, id string) (wallet.W
 	return wallet.NewWallet(id, "permission-player", zero, p.Now())
 }
 
+func (p *walletPermissionProbe) FindTransaction(_ context.Context, id, scope string) (query.Transaction, error) {
+	if id != "permission-tx" || (scope != "" && scope != "provider-a") {
+		return query.Transaction{}, query.ErrNotFound
+	}
+	amount, _ := money.New("1.00", "BRL")
+	balance, _ := money.Zero("BRL")
+	return query.Transaction{TransactionID: id, Origin: "EXTERNAL", Kind: "BET", Status: "PROCESSED", ProviderID: "provider-a", ExternalTransactionID: "bet-1", WalletID: "permission-wallet", PlayerID: "permission-player", RoundID: "round", GameID: "game", Money: amount, Balance: balance, WalletVersion: 2, CreatedAt: p.Now(), UpdatedAt: p.Now()}, nil
+}
+func (p *walletPermissionProbe) FindExternal(ctx context.Context, provider, external string) (query.Transaction, error) {
+	if provider != "provider-a" || external != "bet-1" {
+		return query.Transaction{}, query.ErrNotFound
+	}
+	return p.FindTransaction(ctx, "permission-tx", provider)
+}
+func (p *walletPermissionProbe) ListLedger(_ context.Context, id string, _ query.Cursor, _ int) (query.LedgerPage, error) {
+	return query.LedgerPage{WalletID: id, SnapshotVersion: 1, Entries: []query.LedgerEntry{}}, nil
+}
+func (p *walletPermissionProbe) Reconcile(_ context.Context, id string) (query.ReconciliationSnapshot, error) {
+	balance, _ := money.Zero("BRL")
+	return query.ReconciliationSnapshot{WalletID: id, StoredBalance: balance, TotalMinorUnits: "0"}, nil
+}
+
 func middlewareApplication(t *testing.T) (*fx.App, *gin.Engine, *walletPermissionProbe) {
 	t.Helper()
 	var router *gin.Engine
 	var middleware *httpserver.Authentication
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	cfg := config.Auth{IssuerURL: mockURL + "/realms/jungle", Audience: "jungle-api", InternalClientID: "jungle-internal", HTTPTimeout: 500 * time.Millisecond}
+	cfg := config.Auth{IssuerURL: mockURL + "/realms/jungle", Audience: "jungle-api", InternalClientID: "jungle-internal", HTTPTimeout: 500 * time.Millisecond,
+		ProviderClients: map[string]string{"jungle-provider-a": "provider-a", "jungle-provider-b": "provider-b"}}
 	application := fx.New(auth.Module, fx.Supply(logger), fx.Replace(cfg),
 		fx.Provide(httpserver.NewRouter, httpserver.NewAuthentication), fx.Populate(&router, &middleware), fx.NopLogger)
 	if err := application.Err(); err != nil {
@@ -111,6 +198,9 @@ func middlewareApplication(t *testing.T) (*fx.App, *gin.Engine, *walletPermissio
 	probe := new(walletPermissionProbe)
 	opener := applicationwallet.NewOpenWallet(probe, probe, probe)
 	httpserver.RegisterWalletRoutes(router, middleware, httpserver.NewWalletHandler(opener, probe, logger))
+	httpserver.RegisterBetRoutes(router, middleware, httpserver.NewBetHandler(applicationwager.NewProcessBet(probe, probe, probe), applicationwager.NewProcessWin(probe, probe, probe), applicationwager.NewProcessLoss(probe, probe, probe), applicationwager.NewProcessRefund(probe, probe, probe), applicationwager.NewProcessRollback(probe, probe, probe), logger))
+	m := metrics.NewReconciliation()
+	httpserver.RegisterQueryRoutes(router, middleware, httpserver.NewQueryHandler(query.NewService(probe, m), m, logger))
 	return application, router, probe
 }
 
@@ -189,6 +279,49 @@ func TestMiddlewareAgainstPostmanOIDCSimulation(t *testing.T) {
 			t.Fatal("A abertura autorizada deve persistir uma vez")
 		}
 	})
+	t.Run("identidade do provedor antes da aposta e do replay", func(t *testing.T) {
+		body := `{"providerId":"provider-a","externalTransactionId":"bet-1","playerId":"permission-player","walletId":"permission-wallet","roundId":"round","gameId":"game","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`
+		for _, operation := range []string{"BET", "WIN", "LOSS", "REFUND", "ROLLBACK"} {
+			operationBody := strings.Replace(body, `"BET"`, `"`+operation+`"`, 1)
+			if operation == "LOSS" {
+				operationBody = strings.Replace(operationBody, `"1.00"`, `"0.00"`, 1)
+			}
+			if operation == "REFUND" || operation == "ROLLBACK" {
+				operationBody = strings.Replace(operationBody, `"kind":"`+operation+`"`, `"kind":"`+operation+`","referenceExternalTransactionId":"bet-reference"`, 1)
+			}
+			for _, tc := range []struct {
+				kind string
+				want int
+			}{
+				{"valid", 403}, {"unknown-provider", 403}, {"provider-no-role", 403}, {"provider-b", 403}, {"provider-a", 200},
+			} {
+				token := simulatedToken(t, client, tc.kind)
+				request, err := http.NewRequest(http.MethodPost, server.URL+"/wagering/transactions", strings.NewReader(operationBody))
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Header.Set("Authorization", "Bearer "+token)
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Idempotency-Key", "bet-1")
+				response, err := client.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response.Body.Close()
+				want := tc.want
+				if (operation == "REFUND" || operation == "ROLLBACK") && want == 200 {
+					want = 202
+				}
+				if response.StatusCode != want {
+					t.Fatalf("%s %s: status %d, esperado %d", operation, tc.kind, response.StatusCode, want)
+				}
+			}
+		}
+		if probe.bets.Load() != 5 {
+			t.Fatal("Cliente sem vínculo ou sem papel chegou à persistência")
+		}
+		walletRequest(t, client, server.URL, http.MethodGet, simulatedToken(t, client, "provider-a"), http.StatusForbidden)
+	})
 	for _, kind := range []string{"expired", "wrong-issuer", "wrong-audience", "bad-signature", "unsigned", "hmac", "missing-subject", "missing-expiry", "not-before", "future-issued", "id-token"} {
 		t.Run(kind, func(t *testing.T) {
 			protectedRequest(t, client, server.URL, simulatedToken(t, client, kind), http.StatusUnauthorized)
@@ -229,5 +362,54 @@ func TestMiddlewareAgainstPostmanOIDCSimulation(t *testing.T) {
 	failedApplication, _, _ := middlewareApplication(t)
 	if err := failedApplication.Start(ctx); !errors.Is(err, auth.ErrUnavailable) {
 		t.Fatalf("Discovery indisponível deve impedir inicialização: %v", err)
+	}
+}
+
+func TestQueriesAuthorizeReadScopeWithOIDCSimulation(t *testing.T) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	mockRequest(t, client, http.MethodPost, "/__fixtures/reset", nil)
+	application, router, _ := middlewareApplication(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := application.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(router)
+	defer server.Close()
+	for _, tc := range []struct {
+		kind, path, method string
+		want               int
+	}{
+		{"provider-a", "/wagering/transactions/permission-tx", "GET", 200},
+		{"provider-read-only", "/wagering/transactions/permission-tx", "GET", 200},
+		{"provider-write-only", "/wagering/transactions/permission-tx", "GET", 403},
+		{"provider-no-role", "/wagering/transactions/permission-tx", "GET", 403},
+		{"unknown-provider", "/wagering/transactions/permission-tx", "GET", 403},
+		{"provider-b", "/wagering/transactions/permission-tx", "GET", 404},
+		{"provider-a", "/providers/provider-b/wagering/transactions/bet-1", "GET", 403},
+		{"provider-a", "/providers/provider-a/wagering/transactions/bet-1", "GET", 200},
+		{"valid", "/wagering/transactions/permission-tx", "GET", 200},
+		{"read-only", "/wagering/transactions/permission-tx", "GET", 200},
+		{"other-client", "/wagering/transactions/permission-tx", "GET", 403},
+		{"provider-a", "/wallets/permission-wallet/ledger", "GET", 403},
+		{"provider-a", "/wallets/permission-wallet/reconciliation", "POST", 403},
+		{"provider-a", "/metrics", "GET", 403},
+		{"read-only", "/wallets/permission-wallet/ledger", "GET", 200},
+		{"read-only", "/wallets/permission-wallet/reconciliation", "POST", 200},
+		{"read-only", "/metrics", "GET", 200},
+	} {
+		request, err := http.NewRequest(tc.method, server.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+simulatedToken(t, client, tc.kind))
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != tc.want {
+			t.Fatalf("%s %s %s: %d esperado %d", tc.kind, tc.method, tc.path, response.StatusCode, tc.want)
+		}
 	}
 }

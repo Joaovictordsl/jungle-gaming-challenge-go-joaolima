@@ -37,3 +37,9 @@ O modo local não requer publicação nem registra histórico com `--no-history`
 
 O teste complementar `go test -race -tags=keycloak ./tests/keycloak` verifica também
 a interoperabilidade do middleware com tokens emitidos pelo Keycloak real.
+
+As consultas de transação também são exercitadas com `provider-read-only` e
+`provider-write-only`: leitura exige `wagering:read`, envio exige `wagering:write`.
+As identidades são vinculadas ao providerId antes de consultar o store. Provedores
+não acessam extrato, reconciliação ou métricas; o cliente interno com wallets:read
+pode acessá-los. O banco real e a API completa são cobertos pelos testes walletapi.

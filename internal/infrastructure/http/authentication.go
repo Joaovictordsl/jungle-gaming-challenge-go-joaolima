@@ -14,6 +14,32 @@ import (
 )
 
 const principalKey = "jungle.auth.principal"
+const providerKey = "jungle.auth.provider"
+
+// AuthorizedProvider consulta exclusivamente o vínculo decidido pelo middleware.
+func AuthorizedProvider(c *gin.Context) (string, bool) {
+	value, ok := c.Get(providerKey)
+	provider, valid := value.(string)
+	return provider, ok && valid && provider != ""
+}
+
+func (m *Authentication) RequireProviderPermission(permission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := m.authenticate(c)
+		if !ok {
+			return
+		}
+		provider, known := m.cfg.ProviderClients[principal.ClientID()]
+		if !known || provider == "" || principal.ClientID() == m.cfg.InternalClientID || !principal.HasRole(permission) {
+			c.Header("Cache-Control", "no-store")
+			c.Header("WWW-Authenticate", "Bearer realm="+strconv.Quote(m.cfg.Audience)+`, error="insufficient_scope"`)
+			c.AbortWithStatusJSON(nethttp.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
+		c.Set(providerKey, provider)
+		c.Next()
+	}
+}
 
 type Authentication struct {
 	verifier auth.TokenVerifier
@@ -94,4 +120,28 @@ func (m *Authentication) unauthorized(c *gin.Context, invalidToken bool) {
 	c.Header("WWW-Authenticate", challenge)
 	c.Header("Cache-Control", "no-store")
 	c.AbortWithStatusJSON(nethttp.StatusUnauthorized, gin.H{"error": "unauthorized"})
+}
+
+// RequireTransactionRead fixa o escopo antes da consulta; IDs internos de outro
+// provedor não são carregados para depois decidir a autorização.
+func (m *Authentication) RequireTransactionRead() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := m.authenticate(c)
+		if !ok {
+			return
+		}
+		if principal.ClientID() == m.cfg.InternalClientID && principal.HasRole("wallets:read") {
+			c.Next()
+			return
+		}
+		provider, known := m.cfg.ProviderClients[principal.ClientID()]
+		if principal.ClientID() != m.cfg.InternalClientID && known && provider != "" && principal.HasRole("wagering:read") {
+			c.Set(providerKey, provider)
+			c.Next()
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		c.Header("WWW-Authenticate", "Bearer realm="+strconv.Quote(m.cfg.Audience)+`, error="insufficient_scope"`)
+		c.AbortWithStatusJSON(nethttp.StatusForbidden, gin.H{"error": "forbidden"})
+	}
 }

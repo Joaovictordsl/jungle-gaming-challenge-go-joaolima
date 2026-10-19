@@ -11,8 +11,22 @@
   "roles": {
     "client": {
       "jungle-api": [
-        { "name": "wallets:read", "description": "Consultar carteiras pelo serviço interno" },
-        { "name": "wallets:write", "description": "Abrir carteiras pelo serviço interno" }
+        {
+          "name": "wallets:read",
+          "description": "Consultar carteiras pelo servi\u00e7o interno"
+        },
+        {
+          "name": "wallets:write",
+          "description": "Abrir carteiras pelo servi\u00e7o interno"
+        },
+        {
+          "name": "wagering:write",
+          "description": "Enviar opera\u00e7\u00f5es do provedor autorizado"
+        },
+        {
+          "name": "wagering:read",
+          "description": "Consultar transa\u00e7\u00f5es do provedor autorizado"
+        }
       ]
     }
   },
@@ -32,11 +46,54 @@
     },
     {
       "clientId": "jungle-internal",
-      "name": "Serviço interno de carteiras",
+      "name": "Servi\u00e7o interno de carteiras",
       "enabled": true,
       "protocol": "openid-connect",
       "clientAuthenticatorType": "client-secret",
       "secret": "${KEYCLOAK_INTERNAL_CLIENT_SECRET}",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "jungle-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jungle-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "jungle-api-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "jungle-api",
+            "claim.name": "resource_access.jungle-api.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "jungle-provider-a",
+      "name": "Provedor A local",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_PROVIDER_A_CLIENT_SECRET}",
       "publicClient": false,
       "bearerOnly": false,
       "standardFlowEnabled": false,
@@ -78,7 +135,17 @@
     "jungle-api": [
       {
         "client": "jungle-internal",
-        "roles": ["wallets:read", "wallets:write"]
+        "roles": [
+          "wallets:read",
+          "wallets:write"
+        ]
+      },
+      {
+        "client": "jungle-provider-a",
+        "roles": [
+          "wagering:write",
+          "wagering:read"
+        ]
       }
     ]
   },
@@ -88,7 +155,21 @@
       "enabled": true,
       "serviceAccountClientId": "jungle-internal",
       "clientRoles": {
-        "jungle-api": ["wallets:read", "wallets:write"]
+        "jungle-api": [
+          "wallets:read",
+          "wallets:write"
+        ]
+      }
+    },
+    {
+      "username": "service-account-jungle-provider-a",
+      "enabled": true,
+      "serviceAccountClientId": "jungle-provider-a",
+      "clientRoles": {
+        "jungle-api": [
+          "wagering:write",
+          "wagering:read"
+        ]
       }
     }
   ]

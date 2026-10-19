@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -14,11 +15,14 @@ type Auth struct {
 	Audience         string
 	InternalClientID string
 	HTTPTimeout      time.Duration
+	// Vínculo explícito azp -> providerId. Nunca é inferido do corpo HTTP.
+	ProviderClients map[string]string
 }
 
 func LoadAuth() (Auth, error) {
 	cfg := Auth{IssuerURL: "http://localhost:8081/realms/jungle", Audience: "jungle-api",
-		InternalClientID: "jungle-internal", HTTPTimeout: 3 * time.Second}
+		InternalClientID: "jungle-internal", HTTPTimeout: 3 * time.Second,
+		ProviderClients: map[string]string{"jungle-provider-a": "provider-a"}}
 	for key, target := range map[string]*string{
 		"OIDC_ISSUER_URL": &cfg.IssuerURL, "OIDC_AUDIENCE": &cfg.Audience, "OIDC_INTERNAL_CLIENT_ID": &cfg.InternalClientID,
 	} {
@@ -32,6 +36,11 @@ func LoadAuth() (Auth, error) {
 			return Auth{}, fmt.Errorf("%w: OIDC_HTTP_TIMEOUT deve ser uma duração positiva", ErrInvalidConfig)
 		}
 		cfg.HTTPTimeout = timeout
+	}
+	if value, exists := os.LookupEnv("OIDC_PROVIDER_CLIENTS"); exists {
+		if json.Unmarshal([]byte(value), &cfg.ProviderClients) != nil || cfg.ProviderClients == nil {
+			return Auth{}, fmt.Errorf("%w: OIDC_PROVIDER_CLIENTS deve ser um objeto JSON de clientes e provedores", ErrInvalidConfig)
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		return Auth{}, err
@@ -59,6 +68,11 @@ func (c Auth) Validate() error {
 	}
 	if c.HTTPTimeout <= 0 {
 		return fmt.Errorf("%w: OIDC_HTTP_TIMEOUT deve ser positivo", ErrInvalidConfig)
+	}
+	for client, provider := range c.ProviderClients {
+		if strings.TrimSpace(client) == "" || strings.TrimSpace(client) != client || client == c.InternalClientID || strings.TrimSpace(provider) == "" || len(provider) > 256 {
+			return fmt.Errorf("%w: vínculo de cliente e provedor inválido", ErrInvalidConfig)
+		}
 	}
 	return nil
 }
