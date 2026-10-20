@@ -18,6 +18,7 @@ identidades IAM separadas. O publisher publica eventos confirmados em `wallet-ev
 
 - Go 1.27.2 ou superior.
 - Docker com Docker Compose.
+- Espaço livre para imagens, volumes dos bancos e cache de compilação do Go.
 - Python 3 para o smoke de ponta a ponta.
 - LocalStack com licença que permita IAM enforcement: CLI autenticado com `lstk login`
   ou token pessoal no shell para a alternativa Compose. Nenhum token acompanha o projeto.
@@ -48,6 +49,9 @@ python3 scripts/smoke.py
 O smoke cria um jogador/carteira exclusivos e verifica OIDC, as cinco operações,
 replays, entrada pela fila, ledger, reconciliação, métricas e esvaziamento da outbox.
 Ele não usa carteiras já existentes. Encerre a API com Ctrl+C.
+
+Os resultados da revisão de entrega e os comandos usados estão em
+[docs/verification.md](docs/verification.md).
 
 Para usar o LocalStack pelo Compose, configure `LOCALSTACK_AUTH_TOKEN` no shell,
 pare a instância CLI que ocupa a porta 4566 e execute:
@@ -1052,6 +1056,12 @@ recuperação e esgotamento com `FAILED` sem efeitos financeiros. O teste da inb
 com três processos independentes disputa entrada direta e envelopes sobre a mesma
 carteira e recupera os resultados em processos novos. A fiscalização IAM é
 verificada separadamente por `verify-iam.py`, com as credenciais restritas.
+
+O teste do consumidor também inicia um processo independente e o encerra sem
+executar defers depois do commit e antes de DeleteMessage. Após a expiração nativa
+da visibilidade, outro consumidor recupera a inbox e remove a mensagem sem repetir
+saldo, ledger ou outbox. O prazo curto de visibilidade pertence somente à entrega
+descartável desse cenário; a configuração normal continua em 30 segundos.
 
 Os testes de FAILED financeiro cobrem os cinco tipos, rollback dos efeitos antes
 da auditoria, replay com outro messageId e pelos stores HTTP, saldo histórico após

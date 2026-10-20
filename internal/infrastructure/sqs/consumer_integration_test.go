@@ -7,11 +7,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -281,5 +283,81 @@ func TestConsumerCommitDeleteFailureAndExhaustionWithRealBrokerIntegration(t *te
 	}
 	consumer.handle(ctx, receive(2))
 	state(2000, 5, 4)
+	// Processo independente encerra sem defers entre o commit da inbox e ACK.
+	sendWin("crashed")
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestConsumerCrashProcessHelper$")
+	child.Env = append(os.Environ(), "JUNGLE_CONSUMER_CHILD=1", "JUNGLE_CONSUMER_DATABASE="+pool.Config().ConnString(), "JUNGLE_CONSUMER_ENDPOINT="+endpoint, "JUNGLE_CONSUMER_SOURCE="+aws.ToString(source.QueueUrl), "JUNGLE_CONSUMER_DLQ="+aws.ToString(dlq.QueueUrl))
+	output, err := child.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "COMMITTED_BEFORE_DELETE") {
+		t.Fatal("consumidor não atingiu o ponto de interrupção", err)
+	}
+	state(10000, 6, 5)
+	// A API administrativa deste fixture tem timeout de 5s. Polls sem espera
+	// acompanham a expiração nativa sem iniciar um long poll de 20s nesse cliente.
+	var redelivery *Delivery
+	until := time.Now().Add(10 * time.Second)
+	for time.Now().Before(until) {
+		batch, err := api.ReceiveMessage(ctx, &sdk.ReceiveMessageInput{QueueUrl: source.QueueUrl, MaxNumberOfMessages: 1, WaitTimeSeconds: 0, MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameAll}})
+		if err != nil {
+			t.Fatal("reentrega após crash indisponível", err)
+		}
+		if len(batch.Messages) > 0 {
+			m := batch.Messages[0]
+			if m.Attributes["ApproximateReceiveCount"] != "2" {
+				t.Fatal("crash não gerou segundo recebimento")
+			}
+			redelivery = &Delivery{BrokerID: aws.ToString(m.MessageId), Receipt: aws.ToString(m.ReceiptHandle), Body: aws.ToString(m.Body), GroupID: m.Attributes["MessageGroupId"], Attempt: 2}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if redelivery == nil {
+		t.Fatal("broker não reentregou mensagem após crash")
+	}
+	consumer.handle(ctx, *redelivery)
+	state(10000, 6, 5)
+	var ledgers, events int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id=t.id),(SELECT count(*) FROM outbox_events WHERE transaction_id=t.id) FROM wager_transactions t WHERE external_transaction_id='crashed'`).Scan(&ledgers, &events); err != nil || ledgers != 1 || events != 2 {
+		t.Fatal("reentrega após crash duplicou efeitos", err)
+	}
+	if !strings.Contains(consumer.metrics.Prometheus(), "jungle_sqs_inbox_replayed_total 2\n") {
+		t.Fatal("processo novo não recuperou a inbox")
+	}
 
+}
+
+type crashBeforeDelete struct{ *Client }
+
+func (b *crashBeforeDelete) Delete(context.Context, string) error {
+	fmt.Println("COMMITTED_BEFORE_DELETE")
+	os.Exit(0)
+	return nil
+}
+
+func TestConsumerCrashProcessHelper(t *testing.T) {
+	if os.Getenv("JUNGLE_CONSUMER_CHILD") != "1" {
+		t.Skip("helper de processo independente")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, os.Getenv("JUNGLE_CONSUMER_DATABASE"))
+	if err != nil {
+		t.Fatal("pool do processo inválido")
+	}
+	defer pool.Close()
+	api := sdk.NewFromConfig(aws.Config{Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""), HTTPClient: &http.Client{Timeout: 5 * time.Second}}, func(o *sdk.Options) { o.BaseEndpoint = aws.String(os.Getenv("JUNGLE_CONSUMER_ENDPOINT")) })
+	client := &Client{API: api, QueueURL: os.Getenv("JUNGLE_CONSUMER_SOURCE"), DLQURL: os.Getenv("JUNGLE_CONSUMER_DLQ")}
+	delivery, err := client.Receive(ctx)
+	if err != nil || delivery == nil {
+		t.Fatal("processo não recebeu entrega")
+	}
+	// Prazo curto somente para esta entrega descartável; não muda a fila nem
+	// libera a mensagem após o crash. O broker expira sua visibilidade.
+	if _, err := api.ChangeMessageVisibility(ctx, &sdk.ChangeMessageVisibilityInput{QueueUrl: aws.String(client.QueueURL), ReceiptHandle: aws.String(delivery.Receipt), VisibilityTimeout: 1}); err != nil {
+		t.Fatal("visibilidade de teste inválida")
+	}
+	service := message.NewService(postgres.NewInboxStore(pool), appwager.NewDispatcher(liveIDs{}, liveClock{}))
+	consumer := Consumer{broker: &crashBeforeDelete{client}, service: service, cfg: config.SQS{ConsumerName: "consumer", ProviderID: "provider-a"}, metrics: metrics.NewMessaging(), logger: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	consumer.handle(ctx, *delivery)
+	t.Fatal("processo retornou sem interromper antes do ACK")
 }

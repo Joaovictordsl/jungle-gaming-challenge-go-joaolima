@@ -790,6 +790,10 @@ A migration da inbox impede commit de inbox
 PENDING, mudanças/exclusão/truncate de resultados e down com histórico de inbox.
 
 O consumidor usa 4 pollers (configurável 1..16), recebendo uma mensagem por vez.
+O teste de crash usa um processo independente que sai sem defers exatamente
+quando o consumidor chama DeleteMessage, portanto depois do commit. A visibilidade
+da entrega expira no broker; outro consumidor encontra a inbox confirmada e faz
+ACK sem reaplicar o efeito financeiro. Não há liberação manual depois do crash.
 Commit precede DeleteMessage. Falha de remoção libera a visibilidade; reentrega
 é resolvida pela inbox. Rejeição de negócio e referência pendente durável podem
 ser removidas. Falhas transitórias usam ChangeMessageVisibility com 1/2/4/8s;
