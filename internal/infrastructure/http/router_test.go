@@ -34,7 +34,6 @@ func TestRouterRejectsUnsupportedMethodsAndUnknownRoutes(t *testing.T) {
 		{nethttp.MethodPost, "/health/live", `{"error":"method_not_allowed"}`, nethttp.StatusMethodNotAllowed},
 		{nethttp.MethodGet, "/missing", `{"error":"not_found"}`, nethttp.StatusNotFound},
 		{nethttp.MethodGet, "/health/live/", `{"error":"not_found"}`, nethttp.StatusNotFound},
-		{nethttp.MethodGet, "/health/ready", `{"error":"not_found"}`, nethttp.StatusNotFound},
 		{nethttp.MethodPost, "/wallets", `{"error":"not_found"}`, nethttp.StatusNotFound},
 	} {
 		response := httptest.NewRecorder()

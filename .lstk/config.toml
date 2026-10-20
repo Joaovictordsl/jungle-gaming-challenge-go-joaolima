@@ -1,0 +1,21 @@
+[[containers]]
+type = "aws"
+tag = "2026.10.0"
+container_name = "localstack-aws"
+port = "4566"
+env = ["jungle"]
+volumes = [
+  "../.localstack:/var/lib/localstack",
+  "../docker/localstack/init-sqs.py:/etc/localstack/init/ready.d/10-init-sqs.py:ro",
+  "../docker/localstack/healthcheck.py:/etc/localstack/jungle-healthcheck.py:ro",
+  "../docker/localstack/verify-sqs.py:/etc/localstack/verify-sqs.py:ro",
+  "../docker/localstack/verify-iam.py:/etc/localstack/verify-iam.py:ro",
+  "../docker/localstack/send-wager.py:/etc/localstack/send-wager.py:ro",
+]
+
+[env.jungle]
+ENFORCE_IAM = "1"
+PERSISTENCE = "1"
+SERVICES = "sqs,iam,sts,cloudwatch"
+AWS_DEFAULT_REGION = "us-east-1"
+SQS_ENDPOINT_STRATEGY = "dynamic"

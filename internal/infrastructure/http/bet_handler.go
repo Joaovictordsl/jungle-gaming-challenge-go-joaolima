@@ -2,12 +2,12 @@ package http
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"mime"
 	nethttp "net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,6 +15,7 @@ import (
 	"jungle-gaming-challenge-go-joaolima/internal/domain/money"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wager"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wallet"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/metrics"
 )
 
 type BetHandler struct {
@@ -24,10 +25,11 @@ type BetHandler struct {
 	refund   *applicationwager.ProcessRefund
 	rollback *applicationwager.ProcessRollback
 	logger   *slog.Logger
+	metrics  *metrics.Messaging
 }
 
-func NewBetHandler(process *applicationwager.ProcessBet, win *applicationwager.ProcessWin, loss *applicationwager.ProcessLoss, refund *applicationwager.ProcessRefund, rollback *applicationwager.ProcessRollback, logger *slog.Logger) *BetHandler {
-	return &BetHandler{process: process, win: win, loss: loss, refund: refund, rollback: rollback, logger: logger}
+func NewBetHandler(process *applicationwager.ProcessBet, win *applicationwager.ProcessWin, loss *applicationwager.ProcessLoss, refund *applicationwager.ProcessRefund, rollback *applicationwager.ProcessRollback, m *metrics.Messaging, logger *slog.Logger) *BetHandler {
+	return &BetHandler{process: process, win: win, loss: loss, refund: refund, rollback: rollback, metrics: m, logger: logger}
 }
 func RegisterBetRoutes(router *gin.Engine, authentication *Authentication, handler *BetHandler) {
 	router.POST("/wagering/transactions", authentication.RequireProviderPermission("wagering:write"), handler.Submit)
@@ -79,6 +81,8 @@ func (h *BetHandler) Submit(c *gin.Context) {
 	var response betResponse
 	var resultID, resultStatus string
 	var replay bool
+	started := time.Now()
+	defer func() { h.metrics.Financial.Observe("http", kind, resultStatus, replay, err, time.Since(started)) }()
 	if kind == wager.WinKind {
 		result, wasReplay, processErr := h.win.Execute(c.Request.Context(), wager.WinRequest{BetRequest: input.BetRequest, ReferenceExternalTransactionID: input.ReferenceExternalTransactionID})
 		err, replay = processErr, wasReplay
@@ -120,7 +124,7 @@ func (h *BetHandler) Submit(c *gin.Context) {
 				betError(c, 500, "internal_error")
 				return
 			}
-			response = betResponse{TransactionID: result.ID(), Status: result.Status(), Balance: result.Balance(), IdempotentReplay: replay}
+			response = betResponse{TransactionID: result.ID(), Status: result.Status(), Balance: result.Balance(), FailureCode: result.FailureCode(), IdempotentReplay: replay}
 			resultID, resultStatus = result.ID(), result.Status()
 		}
 	} else {
@@ -170,7 +174,7 @@ func (h *BetHandler) Submit(c *gin.Context) {
 		betError(c, status, code)
 		return
 	}
-	if resultStatus != wager.Processed && resultStatus != wager.Rejected && resultStatus != wager.PendingReference {
+	if resultStatus != wager.Processed && resultStatus != wager.Rejected && resultStatus != wager.PendingReference && resultStatus != wager.Failed {
 		betError(c, 500, "internal_error")
 		return
 	}
@@ -179,6 +183,8 @@ func (h *BetHandler) Submit(c *gin.Context) {
 		status = nethttp.StatusUnprocessableEntity
 	} else if resultStatus == wager.PendingReference {
 		status = nethttp.StatusAccepted
+	} else if resultStatus == wager.Failed {
+		status = nethttp.StatusInternalServerError
 	}
 	h.logger.Info("Operação financeira registrada", "kind", kind, "correlationId", resultID, "transactionId", resultID, "walletId", input.WalletID,
 		"providerId", provider, "status", resultStatus, "idempotentReplay", replay)
@@ -187,61 +193,8 @@ func (h *BetHandler) Submit(c *gin.Context) {
 
 func betError(c *gin.Context, status int, code string) { c.JSON(status, gin.H{"error": code}) }
 
-type wagerRequest struct {
-	wager.BetRequest
-	ReferenceExternalTransactionID string
-}
+type wagerRequest = applicationwager.Command
 
 func decodeWagerRequest(body []byte, key string) (wagerRequest, string, error) {
-	fields, err := walletJSONFields(body, []string{"providerId", "externalTransactionId", "playerId", "walletId", "roundId", "gameId", "kind", "money"}, []string{"referenceExternalTransactionId"})
-	if err != nil {
-		return wagerRequest{}, "", err
-	}
-	values := make(map[string]string, 7)
-	for _, name := range []string{"providerId", "externalTransactionId", "playerId", "walletId", "roundId", "gameId", "kind"} {
-		var value *string
-		if json.Unmarshal(fields[name], &value) != nil || value == nil {
-			return wagerRequest{}, "", errInvalidWalletJSON
-		}
-		values[name] = *value
-	}
-	if values["kind"] != wager.BetKind && values["kind"] != wager.WinKind && values["kind"] != wager.LossKind && values["kind"] != wager.RefundKind && values["kind"] != wager.RollbackKind {
-		return wagerRequest{}, "", wager.ErrInvalidBet
-	}
-	var reference string
-	if raw, exists := fields["referenceExternalTransactionId"]; exists {
-		var value *string
-		if (values["kind"] != wager.WinKind && values["kind"] != wager.RefundKind && values["kind"] != wager.RollbackKind) || json.Unmarshal(raw, &value) != nil || value == nil || *value == "" {
-			return wagerRequest{}, "", wager.ErrInvalidWin
-		}
-		reference = *value
-	}
-	financial, err := walletJSONObject(fields["money"], "amount", "currency")
-	if err != nil {
-		return wagerRequest{}, "", err
-	}
-	var amount, currency *string
-	if json.Unmarshal(financial["amount"], &amount) != nil || json.Unmarshal(financial["currency"], &currency) != nil || amount == nil || currency == nil {
-		return wagerRequest{}, "", errInvalidWalletJSON
-	}
-	value, err := money.New(*amount, *currency)
-	if err != nil {
-		return wagerRequest{}, "", err
-	}
-	request := wager.BetRequest{ProviderID: values["providerId"], ExternalTransactionID: values["externalTransactionId"], IdempotencyKey: key,
-		PlayerID: values["playerId"], WalletID: values["walletId"], RoundID: values["roundId"], GameID: values["gameId"], Money: value}
-	decoded := wagerRequest{BetRequest: request, ReferenceExternalTransactionID: reference}
-	switch values["kind"] {
-	case wager.RollbackKind:
-		err = (wager.RollbackRequest{WinRequest: wager.WinRequest{BetRequest: request, ReferenceExternalTransactionID: reference}}).Validate()
-	case wager.RefundKind:
-		err = (wager.RefundRequest{WinRequest: wager.WinRequest{BetRequest: request, ReferenceExternalTransactionID: reference}}).Validate()
-	case wager.LossKind:
-		err = (wager.LossRequest{BetRequest: request}).Validate()
-	case wager.WinKind:
-		err = (wager.WinRequest{BetRequest: request, ReferenceExternalTransactionID: reference}).Validate()
-	default:
-		err = request.Validate()
-	}
-	return decoded, values["kind"], err
+	return applicationwager.DecodeCommand(body, key)
 }

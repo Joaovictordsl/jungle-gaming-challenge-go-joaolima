@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/metrics"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
@@ -47,7 +48,7 @@ func TestWinHTTPResultsAndStrictReferenceParsing(t *testing.T) {
 				t.Fatal("WIN chegou ao caso BET")
 				return wager.Bet{}, false, nil
 			})
-			router.POST("/wagering/transactions", func(c *gin.Context) { c.Set(providerKey, "provider-a") }, NewBetHandler(bet, win, unusedLossProcessor(), unusedRefundProcessor(), unusedRollbackProcessor(), logger).Submit)
+			router.POST("/wagering/transactions", func(c *gin.Context) { c.Set(providerKey, "provider-a") }, NewBetHandler(bet, win, unusedLossProcessor(), unusedRefundProcessor(), unusedRollbackProcessor(), metrics.NewMessaging(), logger).Submit)
 			request := httptest.NewRequest("POST", "/wagering/transactions", strings.NewReader(tc.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Idempotency-Key", "win-key")

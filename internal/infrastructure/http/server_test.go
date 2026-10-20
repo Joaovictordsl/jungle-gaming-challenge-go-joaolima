@@ -19,6 +19,7 @@ import (
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wager"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wallet"
 	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/auth"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/health"
 	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/metrics"
 )
 
@@ -38,7 +39,8 @@ func httpTestApp(t *testing.T, cfg config.HTTP) (*fx.App, *Server, *gin.Engine) 
 		fx.Supply(unusedLossProcessor()),
 		fx.Supply(unusedRefundProcessor()),
 		fx.Supply(unusedRollbackProcessor()),
-		fx.Supply(newTestQueries(), metrics.NewReconciliation()),
+		fx.Supply(newTestQueries(), metrics.NewReconciliation(), metrics.NewMessaging(), metrics.NewCollector(nil, nil, nil)),
+		fx.Supply(fx.Annotate(health.NewService(func(context.Context) error { return nil }, nil, nil), fx.As(new(health.Checker)))),
 		fx.Supply(fx.Annotate(handlerRepository{}, fx.As(new(wallet.Repository)))),
 		fx.Replace(fx.Annotate(tokenVerifierFunc(func(context.Context, string) (auth.Principal, error) {
 			return auth.Principal{}, auth.ErrInvalidToken

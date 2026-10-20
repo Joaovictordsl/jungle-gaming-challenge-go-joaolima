@@ -48,7 +48,7 @@ func (unavailableTokenVerifier) Verify(context.Context, string) (auth.Principal,
 }
 
 func isolatedAuth() fx.Option {
-	return fx.Replace(fx.Annotate(unavailableTokenVerifier{}, fx.As(new(auth.TokenVerifier))))
+	return fx.Replace(config.SQS{}, config.Outbox{}, fx.Annotate(unavailableTokenVerifier{}, fx.As(new(auth.TokenVerifier))))
 }
 
 func TestPostgresLifecycleIntegration(t *testing.T) {

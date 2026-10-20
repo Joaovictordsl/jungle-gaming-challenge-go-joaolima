@@ -14,13 +14,15 @@ import (
 )
 
 type QueryHandler struct {
-	queries *query.Service
-	metrics *metrics.Reconciliation
-	logger  *slog.Logger
+	queries   *query.Service
+	metrics   *metrics.Reconciliation
+	messaging *metrics.Messaging
+	logger    *slog.Logger
+	collector *metrics.Collector
 }
 
-func NewQueryHandler(queries *query.Service, metrics *metrics.Reconciliation, logger *slog.Logger) *QueryHandler {
-	return &QueryHandler{queries: queries, metrics: metrics, logger: logger}
+func NewQueryHandler(queries *query.Service, metrics *metrics.Reconciliation, messaging *metrics.Messaging, collector *metrics.Collector, logger *slog.Logger) *QueryHandler {
+	return &QueryHandler{queries: queries, metrics: metrics, messaging: messaging, collector: collector, logger: logger}
 }
 func RegisterQueryRoutes(router *gin.Engine, auth *Authentication, h *QueryHandler) {
 	router.GET("/wagering/transactions/:transactionId", auth.RequireTransactionRead(), h.FindTransaction)
@@ -29,7 +31,7 @@ func RegisterQueryRoutes(router *gin.Engine, auth *Authentication, h *QueryHandl
 	router.POST("/wallets/:walletId/reconciliation", auth.RequireInternalPermission("wallets:read"), h.Reconcile)
 	router.GET("/metrics", auth.RequireInternalPermission("wallets:read"), func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
-		c.Data(200, "text/plain; version=0.0.4; charset=utf-8", []byte(h.metrics.Prometheus()))
+		c.Data(200, "text/plain; version=0.0.4; charset=utf-8", []byte(h.metrics.Prometheus()+h.messaging.Prometheus()+h.collector.Prometheus(c.Request.Context())))
 	})
 }
 func (h *QueryHandler) FindTransaction(c *gin.Context) {

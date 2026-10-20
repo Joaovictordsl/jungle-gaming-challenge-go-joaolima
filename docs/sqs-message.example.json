@@ -1,0 +1,19 @@
+{
+  "messageId": "message-bet-example-1",
+  "type": "WagerTransactionRequested",
+  "occurredAt": "2026-10-19T12:00:00Z",
+  "data": {
+    "providerId": "provider-a",
+    "externalTransactionId": "bet-example-1",
+    "idempotencyKey": "bet-example-1-key",
+    "walletId": "SUBSTITUA_PELO_ID_DA_CARTEIRA",
+    "playerId": "SUBSTITUA_PELO_PLAYER_ID",
+    "roundId": "round-example",
+    "gameId": "game-example",
+    "kind": "BET",
+    "money": {
+      "amount": "10.00",
+      "currency": "BRL"
+    }
+  }
+}

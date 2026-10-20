@@ -27,6 +27,7 @@ var _ applicationwager.RollbackStore = (*WinStore)(nil)
 var _ applicationwager.ReferenceProcessor = (*WinStore)(nil)
 
 type WinStore struct {
+	tx   pgx.Tx
 	pool *pgxpool.Pool
 	now  func() time.Time
 }
@@ -81,11 +82,17 @@ func (s *WinStore) processReferenced(ctx context.Context, pending wager.Referenc
 			err = openingStoreError(ctx, "processar operação referenciada", err)
 		}
 	}()
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return wager.Win{}, false, err
+	tx := s.tx
+	owned := tx == nil
+	if owned {
+		tx, err = s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		if err != nil {
+			return wager.Win{}, false, err
+		}
 	}
-	defer rollbackFinancial(tx)
+	if owned {
+		defer rollbackFinancial(tx)
+	}
 	input := pending.Request()
 	hash, err := pending.PayloadHash()
 	if err != nil {
@@ -136,8 +143,10 @@ func (s *WinStore) processReferenced(ctx context.Context, pending wager.Referenc
 	if err := saveReferencedEffects(ctx, tx, completed, current, moved, true); err != nil {
 		return wager.Win{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return wager.Win{}, false, err
+	if owned {
+		if err := tx.Commit(ctx); err != nil {
+			return wager.Win{}, false, err
+		}
 	}
 	return completed, false, nil
 }

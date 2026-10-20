@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"jungle-gaming-challenge-go-joaolima/internal/application/message"
+	"jungle-gaming-challenge-go-joaolima/internal/application/outbox"
 	"jungle-gaming-challenge-go-joaolima/internal/application/query"
 	applicationwager "jungle-gaming-challenge-go-joaolima/internal/application/wager"
 	applicationwallet "jungle-gaming-challenge-go-joaolima/internal/application/wallet"
@@ -23,6 +25,8 @@ var (
 
 var Module = fx.Module("postgres",
 	fx.Provide(NewPool),
+	fx.Provide(func(pool *pgxpool.Pool) outbox.Store { return NewOutboxStore(pool) }),
+	fx.Provide(func(pool *pgxpool.Pool) message.Inbox { return NewInboxStore(pool) }),
 	fx.Provide(func(pool *pgxpool.Pool) query.Store { return NewReadStore(pool) }),
 	fx.Provide(func(pool *pgxpool.Pool) wallet.Repository {
 		return NewWalletRepository(pool)

@@ -46,6 +46,7 @@ type Loss struct {
 	id                   string
 	request              LossRequest
 	status               string
+	failureCode          string
 	balance              money.Money
 	walletVersion        int64
 	createdAt, updatedAt time.Time
@@ -74,10 +75,13 @@ func (l Loss) Validate() error {
 	}
 	switch l.status {
 	case Pending:
-		if l.balance != (money.Money{}) || l.walletVersion != 0 {
+		if l.balance != (money.Money{}) || l.walletVersion != 0 || l.failureCode != "" {
 			return ErrInvalidLoss
 		}
-	case Processed:
+	case Processed, Failed:
+		if (l.status == Processed && l.failureCode != "") || (l.status == Failed && l.failureCode != InfrastructureRetriesExhausted) {
+			return ErrInvalidLoss
+		}
 		if err := l.balance.Validate(); err != nil {
 			return err
 		}
@@ -116,6 +120,7 @@ func (l Loss) Process(current wallet.Wallet, at time.Time) (Loss, error) {
 func (l Loss) ID() string           { return l.id }
 func (l Loss) Request() LossRequest { return l.request }
 func (l Loss) Status() string       { return l.status }
+func (l Loss) FailureCode() string  { return l.failureCode }
 func (l Loss) Balance() money.Money { return l.balance }
 func (l Loss) WalletVersion() int64 { return l.walletVersion }
 func (l Loss) CreatedAt() time.Time { return l.createdAt }

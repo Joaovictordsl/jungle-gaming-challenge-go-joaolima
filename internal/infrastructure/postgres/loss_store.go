@@ -18,7 +18,10 @@ import (
 
 var _ applicationwager.LossStore = (*LossStore)(nil)
 
-type LossStore struct{ pool *pgxpool.Pool }
+type LossStore struct {
+	pool *pgxpool.Pool
+	tx   pgx.Tx
+}
 
 func NewLossStore(pool *pgxpool.Pool) *LossStore { return &LossStore{pool: pool} }
 
@@ -41,11 +44,17 @@ func (s *LossStore) ProcessLoss(ctx context.Context, pending wager.Loss) (result
 			err = openingStoreError(ctx, "processar LOSS", err)
 		}
 	}()
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return wager.Loss{}, false, err
+	tx := s.tx
+	owned := tx == nil
+	if owned {
+		tx, err = s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		if err != nil {
+			return wager.Loss{}, false, err
+		}
 	}
-	defer rollbackFinancial(tx)
+	if owned {
+		defer rollbackFinancial(tx)
+	}
 	input := pending.Request()
 	hash, err := input.PayloadHash()
 	if err != nil {
@@ -94,8 +103,10 @@ func (s *LossStore) ProcessLoss(ctx context.Context, pending wager.Loss) (result
 	if err != nil {
 		return wager.Loss{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return wager.Loss{}, false, err
+	if owned {
+		if err := tx.Commit(ctx); err != nil {
+			return wager.Loss{}, false, err
+		}
 	}
 	return completed, false, nil
 }
@@ -118,16 +129,16 @@ func findLossReplay(ctx context.Context, tx pgx.Tx, input wager.LossRequest, has
 		return wager.Loss{}, false, wager.ErrExternalConflict
 	}
 	var r wager.LossRequest
-	var currency, status string
+	var currency, status, failure string
 	var cents, balance, version int64
 	var created, updated time.Time
 	err = tx.QueryRow(ctx, `SELECT provider_id,external_transaction_id,idempotency_key,wallet_id,player_id,round_id,game_id,
-  currency,amount_cents,status,balance_after_cents,wallet_version,created_at,updated_at FROM wager_transactions WHERE id=$1 AND kind='LOSS'`, id).
-		Scan(&r.ProviderID, &r.ExternalTransactionID, &r.IdempotencyKey, &r.WalletID, &r.PlayerID, &r.RoundID, &r.GameID, &currency, &cents, &status, &balance, &version, &created, &updated)
+  currency,amount_cents,status,balance_after_cents,wallet_version,created_at,updated_at,COALESCE(failure_code,'') FROM wager_transactions WHERE id=$1 AND kind='LOSS'`, id).
+		Scan(&r.ProviderID, &r.ExternalTransactionID, &r.IdempotencyKey, &r.WalletID, &r.PlayerID, &r.RoundID, &r.GameID, &currency, &cents, &status, &balance, &version, &created, &updated, &failure)
 	if err != nil {
 		return wager.Loss{}, false, err
 	}
-	if status != wager.Processed {
+	if status != wager.Processed && status != wager.Failed {
 		return wager.Loss{}, false, wager.ErrInvalidState
 	}
 	r.Money, err = money.FromMinorUnits(cents, currency)
@@ -143,5 +154,8 @@ func findLossReplay(ctx context.Context, tx pgx.Tx, input wager.LossRequest, has
 		return wager.Loss{}, false, err
 	}
 	result, err := wager.RehydrateLoss(id, r, observed, version, created, updated)
+	if status == wager.Failed {
+		result, err = wager.RehydrateFailedLoss(id, r, failure, observed, version, created, updated)
+	}
 	return result, err == nil, err
 }

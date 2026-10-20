@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"jungle-gaming-challenge-go-joaolima/internal/infrastructure/metrics"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
@@ -28,7 +29,7 @@ func lossTestRouter(t *testing.T, store lossStoreFunc) *gin.Engine {
 		t.Fatal("LOSS chegou ao caso WIN")
 		return wager.Win{}, false, nil
 	})
-	router.POST("/wagering/transactions", func(c *gin.Context) { c.Set(providerKey, "provider-a") }, NewBetHandler(bet, win, testLossProcessor(store), unusedRefundProcessor(), unusedRollbackProcessor(), logger).Submit)
+	router.POST("/wagering/transactions", func(c *gin.Context) { c.Set(providerKey, "provider-a") }, NewBetHandler(bet, win, testLossProcessor(store), unusedRefundProcessor(), unusedRollbackProcessor(), metrics.NewMessaging(), logger).Submit)
 	return router
 }
 

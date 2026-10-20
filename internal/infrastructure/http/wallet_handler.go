@@ -1,7 +1,6 @@
 package http
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"jungle-gaming-challenge-go-joaolima/internal/contract/strictjson"
 
 	applicationwallet "jungle-gaming-challenge-go-joaolima/internal/application/wallet"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/money"
@@ -157,57 +157,8 @@ func decodeWalletRequest(body []byte) (playerID, amount, currency string, err er
 }
 
 func walletJSONObject(body []byte, allowed ...string) (map[string]json.RawMessage, error) {
-	return walletJSONFields(body, allowed, nil)
+	return strictjson.Object(body, allowed...)
 }
-
 func walletJSONFields(body []byte, required, optional []string) (map[string]json.RawMessage, error) {
-	allowed := append(append([]string{}, required...), optional...)
-	if !utf8.Valid(body) {
-		return nil, errInvalidWalletJSON
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
-		return nil, errInvalidWalletJSON
-	}
-	fields := make(map[string]json.RawMessage, len(allowed))
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return nil, errInvalidWalletJSON
-		}
-		key, ok := token.(string)
-		if !ok {
-			return nil, errInvalidWalletJSON
-		}
-		known := false
-		for _, candidate := range allowed {
-			if key == candidate {
-				known = true
-				break
-			}
-		}
-		if _, duplicate := fields[key]; !known || duplicate {
-			return nil, errInvalidWalletJSON
-		}
-		var value json.RawMessage
-		if decoder.Decode(&value) != nil {
-			return nil, errInvalidWalletJSON
-		}
-		fields[key] = value
-	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') {
-		return nil, errInvalidWalletJSON
-	}
-	for _, key := range required {
-		if _, exists := fields[key]; !exists {
-			return nil, errInvalidWalletJSON
-		}
-	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errInvalidWalletJSON
-	}
-	return fields, nil
+	return strictjson.Fields(body, required, optional)
 }

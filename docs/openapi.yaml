@@ -166,7 +166,25 @@ paths:
                 failureCode: INSUFFICIENT_FUNDS
                 idempotentReplay: false
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: |
+            internal_error sem resultado durável ou replay de uma transação FAILED.
+            FAILED usa BetResult com INFRASTRUCTURE_RETRIES_EXHAUSTED: as tentativas
+            SQS esgotaram e a auditoria foi confirmada sem saldo, ledger ou outbox.
+            Repetir a mesma identidade preserva a falha mesmo após recuperação.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/BetResult'
+              examples:
+                failed:
+                  value:
+                    transactionId: failed-transaction
+                    status: FAILED
+                    balance: {amount: '100.00', currency: BRL}
+                    failureCode: INFRASTRUCTURE_RETRIES_EXHAUSTED
+                    idempotentReplay: true
         '503':
           description: |
             service_unavailable para falha transitória no banco ou timeout;
@@ -475,13 +493,27 @@ paths:
   /metrics:
     get:
       operationId: getMetrics
-      summary: Consulta contadores de reconciliação
-      description: Exige serviço interno com wallets:read. Expõe jungle_reconciliation_checks_total e jungle_reconciliation_divergences_total em formato Prometheus. Contadores por processo, reiniciados com a instância, sem labels por carteira.
+      summary: Consulta métricas financeiras, processamento, SQS e outbox
+      description: |
+        Exige serviço interno com wallets:read. Formato Prometheus. Contadores
+        jungle_wager_responses_total por transporte/tipo/status (incluem replays),
+        jungle_wager_duplicates_total, jungle_wager_conflicts_total por motivo e
+        histograma jungle_wager_processing_seconds do caso de uso HTTP/SQS.
+        Inclui contadores de reconciliação, consumo/retry SQS e publicação da outbox.
+        jungle_wager_transactions representa operações únicas persistidas por tipo/status;
+        jungle_reference_attempts, jungle_outbox_unpublished e jungle_outbox_lag_seconds
+        também vêm do banco. jungle_sqs_dlq_messages consulta quantidades aproximadas
+        visíveis, em voo e atrasadas das DLQs habilitadas, sem consumir mensagens.
+        Scrape paralelo com deadline global de 2s. Falha de uma fonte mantém HTTP 200
+        e jungle_metrics_source_up=0 para ela, omitindo suas amostras sem expor erros.
+        Contadores/histogramas pertencem ao processo e reiniciam com ele. Gauges do
+        banco/filas são compartilhados: agregar por max, não somar entre réplicas.
+        Labels limitados a enums, sem IDs de jogador, carteira ou provedor.
       security:
         - BearerAuth: []
       responses:
         '200':
-          description: Contadores do processo.
+          description: Contadores/histogramas do processo e snapshots das fontes disponíveis.
           content:
             text/plain:
               schema: {type: string}
@@ -491,6 +523,59 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '503':
           $ref: '#/components/responses/AuthenticationUnavailable'
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Verifica a disponibilidade das dependências habilitadas
+      description: |
+        Endpoint público, sem autenticação e sem cache. Executa Ping no pool PostgreSQL
+        e consulta atributos das filas/DLQs dos módulos SQS habilitados, em paralelo,
+        com prazo total de 2 segundos e cancelamento pelo contexto da requisição.
+        Não publica, recebe ou remove mensagens, nem grava dados financeiros.
+        Módulos SQS desabilitados aparecem como disabled e não bloqueiam prontidão.
+        Uma falha, timeout, configuração FIFO/redrive inválida ou acesso negado
+        resulta em unavailable e HTTP 503, sem expor URLs, credenciais ou erros internos.
+        A checagem de metadados não testa envio/consumo de mensagens ou o Keycloak.
+      security: []
+      responses:
+        '200':
+          description: PostgreSQL e todos os módulos SQS habilitados estão acessíveis.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Readiness'
+                  - type: object
+                    properties:
+                      status: {type: string, enum: [ready]}
+              example:
+                status: ready
+                checks: {postgres: ok, sqsConsumer: ok, sqsPublisher: ok}
+        '503':
+          description: Ao menos uma dependência necessária está indisponível ou excedeu o prazo.
+          headers:
+            Cache-Control:
+              schema: {type: string, enum: [no-store]}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Readiness'
+                  - type: object
+                    properties:
+                      status: {type: string, enum: [not_ready]}
+              example:
+                status: not_ready
+                checks: {postgres: ok, sqsConsumer: unavailable, sqsPublisher: disabled}
+        '405':
+          description: Método diferente de GET não é suportado neste caminho.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /health/live:
     get:
       operationId: getLiveness
@@ -598,6 +683,20 @@ components:
             $ref: '#/components/schemas/Error'
           example: {error: authentication_unavailable}
   schemas:
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status, checks]
+      properties:
+        status: {type: string, enum: [ready, not_ready]}
+        checks:
+          type: object
+          additionalProperties: false
+          required: [postgres, sqsConsumer, sqsPublisher]
+          properties:
+            postgres: {type: string, enum: [ok, unavailable]}
+            sqsConsumer: {type: string, enum: [ok, unavailable, disabled]}
+            sqsPublisher: {type: string, enum: [ok, unavailable, disabled]}
     Transaction:
       type: object
       additionalProperties: false
@@ -607,7 +706,7 @@ components:
         transactionId: {type: string}
         origin: {type: string, enum: [INTERNAL, EXTERNAL]}
         kind: {type: string, enum: [OPENING, BET, WIN, LOSS, REFUND, ROLLBACK]}
-        status: {type: string, enum: [PROCESSED, REJECTED, PENDING_REFERENCE]}
+        status: {type: string, enum: [PROCESSED, REJECTED, PENDING_REFERENCE, FAILED]}
         providerId: {type: string}
         externalTransactionId: {type: string}
         walletId: {type: string}
@@ -619,7 +718,7 @@ components:
         balance:
           $ref: '#/components/schemas/Money'
         walletVersion: {type: integer, format: int64, minimum: 1}
-        failureCode: {type: string, description: Presente em rejeição definitiva.}
+        failureCode: {type: string, description: Presente em REJECTED ou FAILED.}
         referenceExternalTransactionId: {type: string}
         referenceTransactionId: {type: string}
         createdAt: {type: string, format: date-time}
@@ -789,13 +888,13 @@ components:
       required: [transactionId, status, balance, idempotentReplay]
       properties:
         transactionId: {type: string}
-        status: {type: string, enum: [PROCESSED, REJECTED, PENDING_REFERENCE]}
+        status: {type: string, enum: [PROCESSED, REJECTED, PENDING_REFERENCE, FAILED]}
         balance:
           $ref: '#/components/schemas/Money'
         failureCode:
           type: string
-          enum: [INSUFFICIENT_FUNDS, BALANCE_OVERFLOW, REFERENCE_MISMATCH, REFERENCE_REJECTED, REFERENCE_NOT_FOUND, REFERENCE_AMOUNT_MISMATCH, ALREADY_REVERSED, REVERSAL_INSUFFICIENT_FUNDS]
-          description: Presente somente quando status=REJECTED.
+          enum: [INSUFFICIENT_FUNDS, BALANCE_OVERFLOW, REFERENCE_MISMATCH, REFERENCE_REJECTED, REFERENCE_NOT_FOUND, REFERENCE_AMOUNT_MISMATCH, ALREADY_REVERSED, REVERSAL_INSUFFICIENT_FUNDS, INFRASTRUCTURE_RETRIES_EXHAUSTED]
+          description: Presente em REJECTED ou FAILED; infraestrutura esgotada usa INFRASTRUCTURE_RETRIES_EXHAUSTED.
         idempotentReplay: {type: boolean}
     Money:
       type: object

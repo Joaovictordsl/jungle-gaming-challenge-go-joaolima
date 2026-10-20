@@ -19,7 +19,8 @@ import (
 
 var Module = fx.Module("http",
 	auth.Module,
-	fx.Provide(config.LoadHTTP, NewRouter, NewServer, NewAuthentication, NewWalletHandler, NewBetHandler, NewQueryHandler),
+	fx.Provide(config.LoadHTTP, NewRouter, NewServer, NewAuthentication, NewWalletHandler, NewBetHandler, NewQueryHandler, NewReadinessHandler),
+	fx.Invoke(RegisterReadinessRoutes),
 	fx.Invoke(RegisterWalletRoutes),
 	fx.Invoke(RegisterBetRoutes),
 	fx.Invoke(RegisterQueryRoutes),

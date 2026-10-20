@@ -198,9 +198,9 @@ func middlewareApplication(t *testing.T) (*fx.App, *gin.Engine, *walletPermissio
 	probe := new(walletPermissionProbe)
 	opener := applicationwallet.NewOpenWallet(probe, probe, probe)
 	httpserver.RegisterWalletRoutes(router, middleware, httpserver.NewWalletHandler(opener, probe, logger))
-	httpserver.RegisterBetRoutes(router, middleware, httpserver.NewBetHandler(applicationwager.NewProcessBet(probe, probe, probe), applicationwager.NewProcessWin(probe, probe, probe), applicationwager.NewProcessLoss(probe, probe, probe), applicationwager.NewProcessRefund(probe, probe, probe), applicationwager.NewProcessRollback(probe, probe, probe), logger))
+	httpserver.RegisterBetRoutes(router, middleware, httpserver.NewBetHandler(applicationwager.NewProcessBet(probe, probe, probe), applicationwager.NewProcessWin(probe, probe, probe), applicationwager.NewProcessLoss(probe, probe, probe), applicationwager.NewProcessRefund(probe, probe, probe), applicationwager.NewProcessRollback(probe, probe, probe), metrics.NewMessaging(), logger))
 	m := metrics.NewReconciliation()
-	httpserver.RegisterQueryRoutes(router, middleware, httpserver.NewQueryHandler(query.NewService(probe, m), m, logger))
+	httpserver.RegisterQueryRoutes(router, middleware, httpserver.NewQueryHandler(query.NewService(probe, m), m, metrics.NewMessaging(), nil, logger))
 	return application, router, probe
 }
 

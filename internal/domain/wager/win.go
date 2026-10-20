@@ -76,7 +76,7 @@ type Reference struct {
 
 func (r Reference) Validate() error {
 	if strings.TrimSpace(r.ID) == "" || (r.Kind != BetKind && r.Kind != WinKind && r.Kind != LossKind && r.Kind != RefundKind && r.Kind != RollbackKind) ||
-		(r.Status != Pending && r.Status != PendingReference && r.Status != Processed && r.Status != Rejected) {
+		(r.Status != Pending && r.Status != PendingReference && r.Status != Processed && r.Status != Rejected && r.Status != Failed) {
 		return ErrInvalidWin
 	}
 	if r.Kind == LossKind {
@@ -168,6 +168,10 @@ func (w ReferencedTransaction) Validate() error {
 		return ErrInvalidWin
 	}
 	switch w.status {
+	case Failed:
+		if w.failureCode != InfrastructureRetriesExhausted || w.before != w.balance || w.direction != "" || w.referenceID != "" {
+			return ErrInvalidWin
+		}
 	case PendingReference:
 		if w.request.ReferenceExternalTransactionID == "" || w.referenceID != "" || w.failureCode != "" || w.before != w.balance || w.direction != "" {
 			return ErrInvalidWin

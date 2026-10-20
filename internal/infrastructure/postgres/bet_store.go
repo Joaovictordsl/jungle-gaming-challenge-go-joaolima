@@ -20,7 +20,10 @@ import (
 
 var _ applicationwager.BetStore = (*BetStore)(nil)
 
-type BetStore struct{ pool *pgxpool.Pool }
+type BetStore struct {
+	pool *pgxpool.Pool
+	tx   pgx.Tx
+}
 
 func NewBetStore(pool *pgxpool.Pool) *BetStore { return &BetStore{pool: pool} }
 
@@ -44,15 +47,17 @@ func (s *BetStore) ProcessBet(ctx context.Context, pending wager.Bet) (result wa
 			err = openingStoreError(ctx, "processar BET", err)
 		}
 	}()
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return wager.Bet{}, false, err
+	tx := s.tx
+	owned := tx == nil
+	if owned {
+		tx, err = s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		if err != nil {
+			return wager.Bet{}, false, err
+		}
 	}
-	defer func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = tx.Rollback(cleanup)
-	}()
+	if owned {
+		defer rollbackFinancial(tx)
+	}
 	input := pending.Request()
 	hash, err := input.PayloadHash()
 	if err != nil {
@@ -155,8 +160,10 @@ func (s *BetStore) ProcessBet(ctx context.Context, pending wager.Bet) (result wa
 			return wager.Bet{}, false, err
 		}
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return wager.Bet{}, false, err
+	if owned {
+		if err = tx.Commit(ctx); err != nil {
+			return wager.Bet{}, false, err
+		}
 	}
 	return completed, false, nil
 }

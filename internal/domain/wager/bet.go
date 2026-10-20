@@ -96,7 +96,7 @@ func NewBet(id string, request BetRequest, at time.Time) (Bet, error) {
 // RehydrateBet restaura um resultado terminal sem reaplicar o débito.
 func RehydrateBet(id string, request BetRequest, status, failure string, before, balance money.Money, version int64, created, updated time.Time) (Bet, error) {
 	b := Bet{id: id, request: request, status: status, failureCode: failure, before: before, balance: balance, walletVersion: version, createdAt: created.UTC(), updatedAt: updated.UTC()}
-	if status != Processed && status != Rejected {
+	if status != Processed && status != Rejected && status != Failed {
 		return Bet{}, ErrInvalidState
 	}
 	if err := b.Validate(); err != nil {
@@ -118,7 +118,7 @@ func (b Bet) Validate() error {
 		}
 		return nil
 	}
-	if b.status != Processed && b.status != Rejected {
+	if b.status != Processed && b.status != Rejected && b.status != Failed {
 		return ErrInvalidState
 	}
 	for _, m := range []money.Money{b.before, b.balance} {
@@ -132,7 +132,11 @@ func (b Bet) Validate() error {
 	if b.walletVersion < 1 {
 		return ErrInvalidBet
 	}
-	if b.status == Rejected {
+	if b.status == Failed {
+		if b.failureCode != InfrastructureRetriesExhausted || b.before != b.balance {
+			return ErrInvalidBet
+		}
+	} else if b.status == Rejected {
 		if b.failureCode != InsufficientFunds || b.before != b.balance || b.request.Money.MinorUnits() <= b.before.MinorUnits() {
 			return ErrInvalidBet
 		}

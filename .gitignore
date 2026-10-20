@@ -1,3 +1,10 @@
 .env
 .env.*
 !.env.example
+
+# Estado local do simulador e credenciais IAM geradas.
+.localstack/
+.lstk/*
+!.lstk/config.toml
+__pycache__/
+*.pyc

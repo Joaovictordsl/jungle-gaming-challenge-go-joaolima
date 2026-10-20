@@ -10,7 +10,7 @@ import (
 )
 
 func TestAppRejectsInvalidConfiguration(t *testing.T) {
-	application := New(fx.Replace(config.Config{}), fx.NopLogger)
+	application := New(fx.Replace(config.Config{}, config.SQS{}), fx.NopLogger)
 	if !errors.Is(application.Err(), config.ErrInvalidConfig) {
 		t.Fatalf("Esperava rejeição da configuração antes de conectar; recebeu %v", application.Err())
 	}

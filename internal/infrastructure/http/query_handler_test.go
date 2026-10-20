@@ -43,7 +43,7 @@ func TestReconciliationReportsDivergenceInResponseLogsAndMetrics(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	m := metrics.NewReconciliation()
-	h := NewQueryHandler(query.NewService(s, m), m, logger)
+	h := NewQueryHandler(query.NewService(s, m), m, metrics.NewMessaging(), nil, logger)
 	router := NewRouter(logger)
 	router.POST("/wallets/:walletId/reconciliation", h.Reconcile)
 	request := httptest.NewRequest("POST", "/wallets/w/reconciliation", nil)
@@ -68,7 +68,7 @@ func TestQueryHandlerRejectsInvalidPaginationBeforeStore(t *testing.T) {
 	for _, suffix := range []string{"?limit=0", "?limit=101", "?limit=-1", "?limit=abc", "?limit=", "?limit=1&limit=2", "?cursor=", "?cursor=broken", "?unknown=1", "?limit=%zz"} {
 		store := new(queryStoreStub)
 		m := metrics.NewReconciliation()
-		h := NewQueryHandler(query.NewService(store, m), m, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		h := NewQueryHandler(query.NewService(store, m), m, metrics.NewMessaging(), nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 		r := NewRouter(h.logger)
 		r.GET("/wallets/:walletId/ledger", h.Ledger)
 		request := httptest.NewRequest("GET", "/wallets/w/ledger"+suffix, nil)
@@ -88,7 +88,7 @@ func TestReadErrorsDoNotExposeDriverDetails(t *testing.T) {
 		s := &queryStoreStub{cause: tc.cause}
 		m := metrics.NewReconciliation()
 		logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-		h := NewQueryHandler(query.NewService(s, m), m, logger)
+		h := NewQueryHandler(query.NewService(s, m), m, metrics.NewMessaging(), nil, logger)
 		r := NewRouter(logger)
 		r.GET("/wagering/transactions/:transactionId", h.FindTransaction)
 		response := httptest.NewRecorder()

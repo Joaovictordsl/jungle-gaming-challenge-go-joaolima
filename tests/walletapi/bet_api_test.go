@@ -17,6 +17,8 @@ import (
 	"go.uber.org/fx"
 
 	"jungle-gaming-challenge-go-joaolima/internal/app"
+	"jungle-gaming-challenge-go-joaolima/internal/application/message"
+	appwager "jungle-gaming-challenge-go-joaolima/internal/application/wager"
 	"jungle-gaming-challenge-go-joaolima/internal/config"
 	httpserver "jungle-gaming-challenge-go-joaolima/internal/infrastructure/http"
 )
@@ -52,9 +54,10 @@ func TestBetAPIWithRealKeycloakAndPostgres(t *testing.T) {
 	internal := token("jungle-internal", "KEYCLOAK_INTERNAL_CLIENT_SECRET", "jungle_internal_local")
 	provider := token("jungle-provider-a", "KEYCLOAK_PROVIDER_A_CLIENT_SECRET", "jungle_provider_a_local")
 	var server *httpserver.Server
+	var inbox *message.Service
 	application := app.New(fx.Replace(database, config.HTTP{Address: "127.0.0.1:0", ShutdownTimeout: 2 * time.Second},
 		config.Auth{IssuerURL: issuer, Audience: "jungle-api", InternalClientID: "jungle-internal", HTTPTimeout: 3 * time.Second, ProviderClients: map[string]string{"jungle-provider-a": "provider-a"}},
-		slog.New(slog.NewJSONHandler(io.Discard, nil))), fx.Populate(&server))
+		slog.New(slog.NewJSONHandler(io.Discard, nil))), fx.Populate(&server, &inbox))
 	if err := application.Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -173,5 +176,63 @@ func TestBetAPIWithRealKeycloakAndPostgres(t *testing.T) {
 	loaded := request("GET", "/wallets/"+w.ID, "", "", internal, 200)
 	if err := json.Unmarshal(loaded, &w); err != nil || w.Balance.Amount != "0.01" || w.Version != 4 {
 		t.Fatal("Saldo e versão divergiram do ledger")
+	}
+	// Esgotamento na mesma aplicação/inbox usada pelo consumidor. Após remover
+	// a falha injetada, todos os tipos devem retornar o resultado FAILED por HTTP.
+	for i, kind := range []string{"BET", "WIN", "LOSS", "REFUND", "ROLLBACK"} {
+		amount := "0.01"
+		if kind == "LOSS" {
+			amount = "0.00"
+		}
+		if kind == "REFUND" || kind == "ROLLBACK" {
+			amount = "80.00"
+		}
+		raw := strings.Replace(body("failed-"+kind, amount), `"kind":"BET"`, `"kind":"`+kind+`"`, 1)
+		if kind == "REFUND" || kind == "ROLLBACK" {
+			raw = strings.TrimSuffix(raw, "}") + `,"referenceExternalTransactionId":"external-1"}`
+		}
+		key := "failed-key-" + kind
+		command, _, err := appwager.DecodeCommand([]byte(raw), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := message.Envelope{MessageID: "failed-msg-" + kind, OccurredAt: time.Now().UTC(), Command: command}
+		if _, err := pool.Exec(ctx, `ALTER TABLE outbox_events ADD CONSTRAINT inject_failed_http CHECK(event_type='never') NOT VALID`); err != nil {
+			t.Fatal(err)
+		}
+		failed, _, err := inbox.Execute(ctx, "test-consumer", e, true)
+		if message.PermanentCode(err) != "attempts_exhausted" || failed.Status != "FAILED" {
+			t.Fatal("falha não auditada", err)
+		}
+		if _, err := pool.Exec(ctx, `ALTER TABLE outbox_events DROP CONSTRAINT inject_failed_http`); err != nil {
+			t.Fatal(err)
+		}
+		r := decode(request("POST", "/wagering/transactions", raw, key, provider, 500))
+		if r.Status != "FAILED" || r.FailureCode != "INFRASTRUCTURE_RETRIES_EXHAUSTED" || !r.IdempotentReplay || r.TransactionID != failed.TransactionID || r.Balance.Amount != "0.01" {
+			t.Fatal("HTTP reaplicou operação FAILED")
+		}
+		queried := decode(request("GET", "/wagering/transactions/"+r.TransactionID, "", "", provider, 200))
+		if queried.TransactionID != r.TransactionID || queried.Status != r.Status || queried.FailureCode != r.FailureCode {
+			t.Fatal("GET perdeu auditoria FAILED")
+		}
+		request("POST", "/wagering/transactions", raw, key, internal, 403)
+		request("POST", "/wagering/transactions", strings.Replace(raw, `"roundId":"round"`, `"roundId":"changed"`, 1), key, provider, 409)
+		assertCounts([3]int{6 + i, 4, 9})
+	}
+	loaded = request("GET", "/wallets/"+w.ID, "", "", internal, 200)
+	if json.Unmarshal(loaded, &w) != nil || w.Balance.Amount != "0.01" || w.Version != 4 {
+		t.Fatal("FAILED movimentou carteira")
+	}
+	observed := string(request("GET", "/metrics", "", "", internal, 200))
+	for _, want := range []string{
+		`jungle_wager_responses_total{transport="http",kind="BET",status="PROCESSED"} 4`,
+		`jungle_wager_transactions{kind="BET",status="PROCESSED"} 3`,
+		`jungle_wager_transactions{kind="BET",status="FAILED"} 1`,
+		`jungle_wager_duplicates_total{transport="http"} 7`,
+		`jungle_metrics_source_up{source="postgres"} 1`,
+	} {
+		if !strings.Contains(observed, want+"\n") {
+			t.Fatal("métrica HTTP incorreta", want)
+		}
 	}
 }

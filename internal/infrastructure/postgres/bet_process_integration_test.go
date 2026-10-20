@@ -17,11 +17,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"jungle-gaming-challenge-go-joaolima/internal/application/message"
+	appwager "jungle-gaming-challenge-go-joaolima/internal/application/wager"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/money"
 	"jungle-gaming-challenge-go-joaolima/internal/domain/wager"
 )
 
-type betProcessInput struct{ WalletID, PlayerID, External, Key, Kind, Amount, Reference string }
+type betProcessInput struct{ WalletID, PlayerID, External, Key, Kind, Amount, Reference, MessageID string }
 type betProcessOutput struct {
 	TransactionID, Status string
 	Balance               int64
@@ -52,6 +54,21 @@ func TestBetIndependentProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := wager.BetRequest{ProviderID: "provider-a", ExternalTransactionID: input.External, IdempotencyKey: input.Key, WalletID: input.WalletID, PlayerID: input.PlayerID, RoundID: "round", GameID: "game", Money: amount}
+	if input.MessageID != "" {
+		kind := input.Kind
+		if kind == "" {
+			kind = wager.BetKind
+		}
+		envelope := message.Envelope{MessageID: input.MessageID, OccurredAt: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC), Command: appwager.Command{BetRequest: request, Kind: kind, ReferenceExternalTransactionID: input.Reference}}
+		fmt.Println("BET_READY")
+		result, replay, err := inboxService(pool).Execute(ctx, "consumer", envelope, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(betProcessOutput{TransactionID: result.TransactionID, Status: result.Status, Balance: result.Balance.MinorUnits(), Replay: replay || result.FinancialReplay})
+		fmt.Println("BET_RESULT " + string(data))
+		return
+	}
 	if input.Kind == wager.LossKind {
 		pending, err := wager.NewLoss(rand.Text(), wager.LossRequest{BetRequest: request}, time.Now().UTC().Truncate(time.Microsecond))
 		if err != nil {

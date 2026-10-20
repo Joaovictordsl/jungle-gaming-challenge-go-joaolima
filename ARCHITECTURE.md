@@ -188,7 +188,7 @@ Os eventos concretos `WagerTransactionProcessed` e `WalletBalanceChanged` têm
 estado privado, dados tipados e envelope com versão 1, IDs estáveis, agregado
 igual à carteira, correlação e causa iguais à abertura, e timestamp UTC. Dinheiro
 é serializado por `Money` como strings decimais. Os snapshots são inseridos na
-outbox sem publicação; o publisher será uma etapa posterior. O relógio fornecido
+outbox para publicação posterior ao commit pelo worker independente. O relógio fornecido
 pelo Fx usa resolução de microssegundos para corresponder ao PostgreSQL.
 
 O banco protege ledger e aberturas processadas contra `UPDATE`, `DELETE` e
@@ -239,9 +239,34 @@ e não escreve o valor do panic nem o dump da requisição.
 O contrato em `docs/openapi.yaml` inclui `GET /health/live`, público e sem
 dependência de banco ou SQS por requisição. Responde `200 {"status":"ok"}` sem
 cache. Métodos não suportados recebem `405`; caminhos desconhecidos recebem `404`,
-ambos em JSON. Readiness será acrescentado depois. O script local em
+ambos em JSON. O script local em
 `postman/liveness.assertions.js` permite verificar a resposta de uma instância real
 sem publicar resultados no workspace do Postman.
+
+GET /health/ready é público e usa um Checker de infraestrutura fornecido pelo Fx.
+O composition root conecta Ping do pool, Ready do cliente de comandos e Ready do
+publisher. Probes SQS só são ligados quando seus módulos estão habilitados;
+PostgreSQL é obrigatório. As respostas incluem status ready/not_ready e checks
+postgres/sqsConsumer/sqsPublisher com ok/unavailable/disabled. Prontidão resulta
+em 200; falha ou timeout de uma dependência necessária resulta em 503. Não há
+URLs, erros do driver/SDK, tokens ou credenciais no corpo público.
+
+As três checagens rodam em paralelo com deadline total de 2s e cancelamento pela
+requisição. O handler não fica esperando um probe que demore a encerrar; o canal
+com capacidade para todos os resultados permite seu término sem bloquear o envio.
+Ping inclui a espera por conexão do pool. SQS usa somente GetQueueAttributes das
+filas/DLQs e reaproveita a validação de FIFO, visibilidade e redrive do startup,
+sem reatribuir URLs compartilhadas pelos workers. Não há mutação financeira ou
+operações SendMessage/ReceiveMessage/DeleteMessage. Metadados não demonstram a
+permissão futura de envio/consumo; readiness não verifica Keycloak, migrations ou
+progresso dos workers. A resposta não tem cache e liveness permanece independente.
+
+Testes verificam contrato, acesso público, privacidade dos erros, concorrência dos
+probes e cancelamento. PostgreSQL real cobre saturação, deadline, recuperação e
+pool fechado. HTTP com a composição completa verifica configuração degradada e
+recuperada de SQS. Um cliente de publisher com IAM restrito verifica consultas
+concorrentes sem consumir a mensagem existente nem alterar URLs. O contrato OpenAPI
+e postman/readiness.assertions.js preservam as verificações para novas execuções.
 
 `POST /wallets` exige o cliente interno com `wallets:write`, recebe JSON de até
 16 KiB e chama `OpenWallet`. O parser rejeita campos duplicados, desconhecidos,
@@ -375,7 +400,13 @@ Não há commit intermediário de aceite. Um encerramento antes do commit permit
 rollback e retry; depois do commit, o resultado está persistido para replay.
 Não há pendência durável a ser retomada no fluxo de BET, que não usa referências.
 WIN com referência pode aguardar em `PENDING_REFERENCE`, conforme a seção abaixo.
-Os cinco tipos externos estão implementados. O registro de `FAILED` ainda será acrescentado.
+Os cinco tipos externos também aceitam o terminal `FAILED`, com código
+`INFRASTRUCTURE_RETRIES_EXHAUSTED`. Ele é confirmado quando uma tentativa SQS
+esgota suas retentativas de infraestrutura e o banco permite auditar o resultado.
+O savepoint financeiro é revertido antes de gravar a falha, preservando carteira,
+ledger e outbox. O registro reserva a identidade financeira entre transportes;
+o replay HTTP retorna 500 com o resultado e o GET retorna 200 com a auditoria.
+Uma referência a FAILED é rejeitada como `REFERENCE_REJECTED`.
 
 O hash é SHA-256 hexadecimal de um objeto JSON serializado por `encoding/json`,
 com chaves de mapas ordenadas em todos os níveis. Seus campos são `providerId`,
@@ -383,7 +414,7 @@ com chaves de mapas ordenadas em todos os níveis. Seus campos são `providerId`
 e `money` (`amount` e `currency`). Todos os valores são strings; nenhum passa por
 float. `amount` usa `Money.Amount()`, que remove zeros à esquerda e mantém duas
 casas. Identificadores são preservados sem trim; a chave de idempotência, headers,
-IDs de mensagem e timestamps ficam fora do hash. O futuro consumidor SQS usará o
+IDs de mensagem e timestamps ficam fora do hash. O consumidor SQS usa o
 mesmo `BetRequest` e `PayloadHash`.
 
 As constraints únicas são `(provider_id, idempotency_key)` e
@@ -410,7 +441,7 @@ resultado terminal, carteira, um ledger `DEBIT` e os eventos concretos
 rejeição por saldo insuficiente grava `REJECTED` e `WagerTransactionRejected`,
 preservando saldo e versão, sem ledger. Ambos são imutáveis, inclusive em replays.
 IDs de eventos derivam do ID da transação e os snapshots financeiros usam strings.
-O fluxo não publica eventos; eles permanecem na outbox para o futuro publisher.
+O fluxo financeiro grava eventos; o publisher independente lê os registros confirmados.
 
 O schema distingue a forma de `OPENING` e `BET`, preserva FKs de jogador/moeda,
 impõe equação de débito e saldo não negativo, unicidade de lançamento e de versão
@@ -480,8 +511,7 @@ Referência ainda indisponível confirma `PENDING_REFERENCE` e um snapshot concr
 `WagerTransactionPendingReference`, sem ledger ou alteração na carteira. O HTTP
 retorna `202`; o saldo é apenas o observado na última tentativa. O mesmo POST com
 chave/conteúdo originais permite acompanhar o status. Quando concluído, devolve
-o resultado persistido e terminal com `idempotentReplay: true`. Consultas dedicadas de transações também estão disponíveis por GET. Os eventos permanecem na outbox; o publisher
-SQS não faz parte desta etapa.
+o resultado persistido e terminal com `idempotentReplay: true`. Consultas dedicadas de transações também estão disponíveis por GET. Os eventos permanecem na outbox e o publisher independente os envia após o commit.
 
 `ReferenceWorker` pertence a um módulo Fx, inicia depois do pool e encerra antes
 dele. O HTTP deixa de receber requisições antes do encerramento do worker. Seu loop
@@ -685,10 +715,204 @@ provedor, paginação com commits entre páginas, soma exata, snapshot consisten
 sob escritores concorrentes e detecção de corrupção sem correção. A API real é
 exercitada com Keycloak/PostgreSQL; a simulação OIDC cobre permissões separadas.
 
+## Consumidor SQS, inbox e autorização
+
+O Compose inclui LocalStack 2026.10.0, endpoint loopback, volume persistente,
+serviços sqs/iam/sts e ENFORCE_IAM=1. O token de ativação permanece no ambiente local.
+Uma instância iniciada por lstk tem configuração e armazenamento independentes;
+verificações nela não demonstram persistência após reiniciar a instância Compose.
+
+O ready hook provisiona duas filas FIFO sem purgar mensagens: principal com
+visibilidade 30s, long polling 20s, retenção 4 dias e maxReceiveCount=5; DLQ com
+retenção 14 dias e redrive permitido somente da principal. Criação usa apenas o
+atributo imutável FIFO; SetQueueAttributes reconcilia os demais. A deduplicação
+por conteúdo fica desabilitada. O produtor deve informar deduplicationId incluindo
+a identidade completa do envelope. O helper local usa SHA-256 do corpo UTF-8.
+
+O hook provisiona dois usuários IAM: produtor provider-a e consumidor. Políticas
+restringem ações aos ARNs das filas, sem wildcard de recurso. O consumidor pode
+receber/remover/alterar visibilidade da principal e consultar metadados de ambas;
+o produtor pode enviar e obter a URL somente da principal. As chaves geradas ficam
+em arquivos privados no volume; cópias locais são ignoradas pelo Git. test/test
+é exclusivo do bootstrap e dos testes com filas descartáveis. O script verify-iam
+comprova autorização com acessos permitidos e negações reais, sem alterar mensagens.
+Se ENFORCE_IAM estiver desativado, o script falha: cadastrar políticas nesse modo
+não demonstra autenticação/autorização do broker. O compose exige licença que
+suporte fiscalização IAM. A validação de fluxo FIFO é independente dessa prova.
+
+O cliente Go usa AWS SDK v2, credenciais próprias, SigV4 e transporte HTTP fechado
+pelo Fx. Configuração SQS_ENABLED=false evita conexão e exigência de credenciais.
+Quando habilitado, a inicialização valida acesso, existência das filas, FIFO,
+visibilidade e ligação da DLQ. Um consumidor lógico é vinculado a um provedor
+pela configuração, com fila e IAM dedicados; providerId do corpo deve coincidir.
+A identidade é a autorização para escrever naquela fila, não um atributo livre
+da mensagem. Para múltiplos provedores, instâncias/bindings separados preservam
+esse isolamento. O nome lógico do consumidor permanece igual entre processos.
+
+O envelope estrito WagerTransactionRequested contém messageId, occurredAt RFC3339
+e data com idempotencyKey e comando financeiro. JSON deve ser UTF-8, até 16 KiB,
+sem campos desconhecidos ou repetidos; valores monetários são strings. O parser
+financeiro é compartilhado com HTTP, com as políticas por tipo já existentes.
+MessageGroupId é wallet:SHA256(walletId UTF-8); o tamanho independe do ID original.
+O grupo é validado antes do processamento, mantendo paralelismo entre carteiras.
+A coordenação financeira continua pelo lock SQL da carteira.
+
+A migration 9 cria inbox_messages com unicidade (consumer_name,message_id),
+hash SHA-256 do envelope normalizado e snapshot do resultado ou falha. O hash
+inclui messageId, occurredAt UTC, chave e campos financeiros com Money normalizado.
+O hash financeiro mantém sua regra anterior, excluindo metadados de transporte e
+a chave. Mudança de conteúdo sob a mesma identidade da inbox é conflito permanente.
+Replays recuperam o snapshot original, inclusive após resolver uma referência.
+
+InboxStore abre uma transação READ COMMITTED e tenta inserir PENDING. O índice
+único serializa duplicatas entre instâncias. Dentro de um savepoint, executa os
+mesmos casos de uso de BET/WIN/LOSS/REFUND/ROLLBACK, usando stores vinculados à
+transação externa. Esses stores não abrem nem confirmam outra transação quando
+recebem esse vínculo. O commit externo confirma inbox COMPLETED, operação,
+saldo/versão, ledger e outbox juntos. O HTTP continua usando os stores com seu
+próprio commit. As constraints financeiras adiadas continuam sendo verificadas
+no commit externo. Não existe mutex de negócio ou estado idempotente em memória.
+
+Uma falha transitória reverte também a claim de inbox. Para falha permanente ou
+esgotamento, o savepoint desfaz todo efeito financeiro antes de gravar FAILED na
+inbox. Se o commit falha, não há sucesso ou ACK. JSON inválido não tem identidade
+confiável para uma linha de inbox: a DLQ conserva seu corpo original. Indisponibilidade
+de banco até o último recebimento também pode impedir a auditoria SQL; a DLQ
+continua sendo o registro durável do broker. No esgotamento de infraestrutura,
+`recordFailedTransaction` retoma o lock da carteira e verifica novamente as duas
+identidades financeiras antes de inserir FAILED. Um resultado já confirmado por
+outra instância vence; nunca é sobrescrito. A inbox aponta para o snapshot FAILED
+no mesmo commit. Outro messageId recupera essa identidade e também segue para
+redrive. Erros permanentes de entrada/conflito permanecem somente na inbox.
+A migration 11 valida saldo/versão observados, proíbe ledger e eventos para FAILED,
+mantém imutabilidade terminal e recusa down com auditoria de falha.
+A migration da inbox impede commit de inbox
+PENDING, mudanças/exclusão/truncate de resultados e down com histórico de inbox.
+
+O consumidor usa 4 pollers (configurável 1..16), recebendo uma mensagem por vez.
+Commit precede DeleteMessage. Falha de remoção libera a visibilidade; reentrega
+é resolvida pela inbox. Rejeição de negócio e referência pendente durável podem
+ser removidas. Falhas transitórias usam ChangeMessageVisibility com 1/2/4/8s;
+a quinta tentativa audita esgotamento quando possível. Falhas permanentes são
+liberadas imediatamente para alcançar redrive. Não há publicação manual na DLQ:
+o SQS transfere após maxReceiveCount. A retenção da fila limita a durabilidade
+independentemente do limite de tentativas.
+
+O shutdown cancela os polls e SQL em curso, libera os recebimentos e espera os
+workers antes do transporte SQS e do pool. Commit ambíguo é resolvido por replay.
+Não mantém work concluído em memória entre reinícios. Logs usam IDs/códigos, sem
+corpos e credenciais; métricas por processo contam recebimentos, commits observados,
+replays, retries, falhas por entrega e falhas de remoção. O consumidor apenas grava os eventos; o publisher independente os envia após commit.
+
+Os testes com -race verificam inbox/financeiro atômicos em falhas de outbox e
+commit, cancelamento, conflitos, snapshot, down/up e proteção SQL. Três processos
+independentes disputam entrada direta e inbox na mesma carteira, seguidos de
+novos processos que recuperam os resultados. Com LocalStack real, testes de
+falha exercitam commit seguido de remoção indisponível, recuperação transitória e
+esgotamento com auditoria e DLQ. A aplicação completa usa HTTP, Keycloak, PostgreSQL
+e SQS reais para os cinco tipos, duplicatas nos dois sentidos, pending reference,
+rejeição e DLQ de mensagens inválidas, sem tocar as filas ou o schema da aplicação.
+
+## Publicação da outbox
+
+O módulo PublisherModule liga configuração própria, cliente SQS próprio, Service,
+Store e worker ao Fx. Não usa a credencial do consumidor de comandos. O domínio
+financeiro e seus construtores de eventos permanecem independentes do broker.
+OUTBOX_ENABLED=false não exige conectar ao SQS. O perfil CLI versionado em .lstk
+permite usar a sessão de login existente sem extrair o token; o volume .localstack
+é privado e ignorado pelo Git. CLI e Compose têm armazenamento independente.
+
+O ready hook também provisiona wallet-events.fifo e wallet-events-dlq.fifo com
+os mesmos limites de retenção, redrive, polling e visibilidade das filas de entrada.
+Publisher IAM pode apenas enviar eventos e consultar metadados de saída. A identidade
+de leitura da saída não pode publicar nem acessar comandos. A verificação real
+inclui sete negações e o health check verifica as quatro filas e a fiscalização.
+STS deve estar habilitado: o avaliador IAM do LocalStack o utiliza para resolver
+a identidade; sem ele, a avaliação pode falhar e deixar chamadas passar.
+
+A migration 10 acrescenta publication_sequence positiva, única e imutável. Faz
+backfill por occurred_at/id e aloca sequências para inserções seguintes. O lock
+financeiro da carteira já serializa inserções entre operações dessa carteira.
+Não há lock global de negócio. Uma query com SKIP LOCKED reserva somente o evento
+mais antigo não publicado de cada agregado. Leases de carteiras diferentes podem
+ser adquiridos ao mesmo tempo; backoff/lease do primeiro impede avançar o restante
+daquela carteira. A sequência global não implica ordem global de publicação.
+
+O claim é uma instrução SQL com commit antes de qualquer I/O do broker. Incrementa
+a tentativa e grava token exclusivo e locked_until=agora+30s. O serviço limita
+o envio a 5s e o fechamento SQL a 3s. Depois do envio aceito, Published verifica
+token e validade do lease antes de gravar published_at e liberar a reserva.
+Retry e Release também são condicionados ao token. Um processo antigo não pode
+confirmar, liberar ou adiar a reserva de outro. Não há transação ou conexão SQL
+mantida durante a chamada ao SQS.
+
+Queda após o commit financeiro conserva os eventos na outbox. Queda após claim
+conserva uma reserva recuperável por expiração. Queda entre SendMessage aceito e
+Published provoca republicação do mesmo snapshot/eventId, garantindo pelo menos
+uma vez. FIFO usa grupo wallet:SHA256(walletId) e deduplicationId=SHA256(eventId),
+ambos com comprimento fixo. O assinante deve ter deduplicação SQL por consumidor
+e eventId. Lease/fencing protege a confirmação SQL; não impede envio tardio de
+um emissor pausado. Consumidores de projeção devem conferir walletVersion e
+tratar duplicatas, sem depender exclusivamente da ordem de chegada.
+
+Os snapshots tipados existentes são enviados como JSON bruto da coluna JSONB,
+sem reconstruir dinheiro ou dados da carteira. Os contratos e atributos estão em
+docs/wallet-events.schema.json e no README. Todos os quatro tipos usam a mesma
+fila de saída; eventType/version permitem roteamento no assinante. Metadados
+publicationSequence no SQS facilitam auditoria sem alterar o envelope versionado.
+
+Falha de envio mantém o registro pendente e define retry exponencial limitado a
+60s, indefinidamente. A DLQ de saída trata falhas do assinante, não falha de envio.
+Após publicação, os metadados ficam imutáveis; snapshot e identidade nunca mudam.
+O down recusa remover histórico de delivery. Na parada, o worker cancela claims
+novos e envio em curso, confirma um envio conhecido ou libera o trabalho. Perda de
+contato com o banco deixa o lease expirar, sem descartar evento. As dependências
+fecham após a conclusão dos componentes que as utilizam.
+
+Métricas contam claims, recuperação por expiração, confirmação, falhas de envio e
+perda de lease. Backlog e idade do evento mais antigo são observados a cada 5s,
+com timestamp da última consulta bem-sucedida. Gauges não são publicados antes
+dessa primeira observação. Cada processo tem contadores próprios e observa o
+mesmo backlog; os gauges não devem ser somados entre réplicas. Logs de envio
+incluem eventId, transactionId/correlationId, walletId, providerId quando disponível
+e eventType, sem registrar payloads ou credenciais.
+
+Testes com PostgreSQL verificam fencing de dono antigo, expiração, backoff,
+ordem por carteira, paralelismo entre carteiras, imutabilidade e migração com
+histórico prévio. No SQS real, uma identidade restrita confirma o isolamento IAM.
+Processos são encerrados sem hooks após claim e após envio; processos novos
+recuperam o mesmo eventId. Três processos disputam publicações independentes.
+Uma conexão recusada pelo SDK mantém o backlog; ao recuperar o broker, os quatro
+tipos de evento são entregues com snapshot idêntico. Fx verifica shutdown e
+retomada de backlog por uma instância nova. Todos esses testes usam schemas,
+filas e identidades descartáveis, sem consumir as filas da aplicação.
+
 ## Escopo atual
 
+As métricas de processamento são contadores e histogramas por processo, com
+labels limitados a transporte, tipo, status e motivo de conflito. Replays entram
+nos resultados observados e em duplicatas, sem representar novos movimentos.
+Conflitos distinguem chave/payload, ID externo, serialization failure (40001) e
+deadlock (40P01); esperar pelo lock pessimista não conta como falha de concorrência.
+O histograma mede a execução do caso de uso HTTP/SQS, incluindo espera por lock e
+persistência, sem incluir autenticação, parsing ou espera na fila.
+
+O endpoint /metrics também consulta PostgreSQL e atributos das duas DLQs em
+paralelo, com prazo global de 2s. Falha de uma fonte emite source_up=0 e omite seu
+snapshot; nunca apresenta zero como quantidade observada durante indisponibilidade.
+O banco fornece operações únicas por status, tentativas de referência e backlog/lag
+da outbox, inclusive com publisher desabilitado. DLQ expõe quantidades aproximadas
+visíveis, em voo e atrasadas, sem ReceiveMessage. Snapshots compartilhados devem
+ser agregados por max entre réplicas, enquanto contadores/histogramas podem ser
+somados. Não há labels de identidade. A consulta agregada percorre o histórico;
+em volumes maiores, seria necessário avaliar índices ou uma projeção incremental.
+
+Tracing, dashboards, ledger de partidas dobradas e testes de carga são opcionais
+e não foram implementados. O ambiente local exige licença LocalStack com IAM
+enforcement. A aplicação Go roda no host; o Compose hospeda suas dependências.
+
 O domínio implementa `Money`, criação e reidratação de `Wallet`, abertura interna
-e lançamentos de ledger. O ambiente local inclui PostgreSQL, oito migrations e
+e lançamentos de ledger. O ambiente local inclui PostgreSQL, onze migrations e
 ciclo de vida Fx. O repositório possui `Create` e `FindByID`, e a abertura grava
 seus registros financeiros atomicamente com a outbox. BET debita e WIN credita,
 com resultados externos, referência opcional, worker de retomada e rota HTTP com
@@ -696,7 +920,9 @@ idempotência persistente. LOSS registra o resultado sem movimentação e REFUND
 devolve integralmente uma BET, com referência obrigatória e proteção de duplicidade.
 ROLLBACK desfaz integralmente BET, WIN ou REFUND por uma nova movimentação.
 Consultas de transações, extrato com cursor e reconciliação estão implementados.
-Readiness, SQS, inbox, publisher e métricas dos demais fluxos ainda serão implementados. O servidor Gin e a rota de
+O consumidor SQS, inbox, configuração IAM e métricas de consumo estão implementados.
+O publisher da outbox, o readiness, FAILED financeiro e as métricas obrigatórias
+estão implementados. O servidor Gin e a rota de
 liveness já estão integrados ao ciclo de vida da aplicação. O Keycloak local emite
 tokens do serviço interno com configuração reproduzível pelo Compose, e o
 middleware JWT/OIDC já está integrado ao Fx. A abertura e a consulta de carteiras

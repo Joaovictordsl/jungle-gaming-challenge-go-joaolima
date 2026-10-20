@@ -1,0 +1,445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Wallet events v1",
+  "description": "Snapshot imutável da outbox. SQS FIFO wallet-events.fifo. Entrega pelo menos uma vez: consumidor deve deduplicar por (consumerName,eventId) com conclusão durável antes de DeleteMessage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventType",
+    "aggregateId",
+    "correlationId",
+    "occurredAt",
+    "version",
+    "data"
+  ],
+  "properties": {
+    "eventId": {
+      "$ref": "#/$defs/id"
+    },
+    "eventType": {
+      "enum": [
+        "WagerTransactionProcessed",
+        "WagerTransactionRejected",
+        "WalletBalanceChanged",
+        "WagerTransactionPendingReference"
+      ]
+    },
+    "aggregateId": {
+      "$ref": "#/$defs/id"
+    },
+    "correlationId": {
+      "$ref": "#/$defs/id"
+    },
+    "causationId": {
+      "$ref": "#/$defs/id"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "version": {
+      "const": 1
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "eventType": {
+          "const": "WagerTransactionProcessed"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transactionId",
+            "walletId",
+            "playerId",
+            "kind",
+            "status",
+            "money",
+            "balance",
+            "walletVersion"
+          ],
+          "properties": {
+            "transactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "walletId": {
+              "$ref": "#/$defs/id"
+            },
+            "playerId": {
+              "$ref": "#/$defs/id"
+            },
+            "providerId": {
+              "$ref": "#/$defs/id"
+            },
+            "externalTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "roundId": {
+              "$ref": "#/$defs/id"
+            },
+            "gameId": {
+              "$ref": "#/$defs/id"
+            },
+            "referenceExternalTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "referenceTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "kind": {
+              "enum": [
+                "OPENING",
+                "BET",
+                "WIN",
+                "LOSS",
+                "REFUND",
+                "ROLLBACK"
+              ]
+            },
+            "status": {
+              "const": "PROCESSED"
+            },
+            "money": {
+              "$ref": "#/$defs/money"
+            },
+            "balance": {
+              "$ref": "#/$defs/money"
+            },
+            "walletVersion": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "OPENING"
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "providerId"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "externalTransactionId"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "roundId"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "gameId"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "referenceExternalTransactionId"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "referenceTransactionId"
+                      ]
+                    }
+                  ]
+                }
+              },
+              "else": {
+                "required": [
+                  "providerId",
+                  "externalTransactionId",
+                  "roundId",
+                  "gameId"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "LOSS"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "money": {
+                    "properties": {
+                      "amount": {
+                        "const": "0.00"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "REFUND",
+                      "ROLLBACK"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "referenceExternalTransactionId",
+                  "referenceTransactionId"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "eventType": {
+          "const": "WagerTransactionRejected"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transactionId",
+            "walletId",
+            "playerId",
+            "kind",
+            "status",
+            "money",
+            "balance",
+            "walletVersion",
+            "providerId",
+            "externalTransactionId",
+            "roundId",
+            "gameId",
+            "failureCode"
+          ],
+          "properties": {
+            "transactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "walletId": {
+              "$ref": "#/$defs/id"
+            },
+            "playerId": {
+              "$ref": "#/$defs/id"
+            },
+            "providerId": {
+              "$ref": "#/$defs/id"
+            },
+            "externalTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "roundId": {
+              "$ref": "#/$defs/id"
+            },
+            "gameId": {
+              "$ref": "#/$defs/id"
+            },
+            "referenceExternalTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "referenceTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "kind": {
+              "enum": [
+                "BET",
+                "WIN",
+                "REFUND",
+                "ROLLBACK"
+              ]
+            },
+            "status": {
+              "const": "REJECTED"
+            },
+            "money": {
+              "$ref": "#/$defs/money"
+            },
+            "balance": {
+              "$ref": "#/$defs/money"
+            },
+            "walletVersion": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "failureCode": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "eventType": {
+          "const": "WalletBalanceChanged"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "walletId",
+            "transactionId",
+            "direction",
+            "money",
+            "balanceBefore",
+            "balanceAfter",
+            "walletVersion"
+          ],
+          "properties": {
+            "walletId": {
+              "$ref": "#/$defs/id"
+            },
+            "transactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "direction": {
+              "enum": [
+                "DEBIT",
+                "CREDIT"
+              ]
+            },
+            "money": {
+              "$ref": "#/$defs/money"
+            },
+            "balanceBefore": {
+              "$ref": "#/$defs/money"
+            },
+            "balanceAfter": {
+              "$ref": "#/$defs/money"
+            },
+            "walletVersion": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "eventType": {
+          "const": "WagerTransactionPendingReference"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transactionId",
+            "walletId",
+            "playerId",
+            "kind",
+            "status",
+            "money",
+            "balance",
+            "walletVersion",
+            "providerId",
+            "externalTransactionId",
+            "roundId",
+            "gameId",
+            "referenceExternalTransactionId"
+          ],
+          "properties": {
+            "transactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "walletId": {
+              "$ref": "#/$defs/id"
+            },
+            "playerId": {
+              "$ref": "#/$defs/id"
+            },
+            "providerId": {
+              "$ref": "#/$defs/id"
+            },
+            "externalTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "roundId": {
+              "$ref": "#/$defs/id"
+            },
+            "gameId": {
+              "$ref": "#/$defs/id"
+            },
+            "referenceExternalTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "referenceTransactionId": {
+              "$ref": "#/$defs/id"
+            },
+            "kind": {
+              "enum": [
+                "WIN",
+                "REFUND",
+                "ROLLBACK"
+              ]
+            },
+            "status": {
+              "const": "PENDING_REFERENCE"
+            },
+            "money": {
+              "$ref": "#/$defs/money"
+            },
+            "balance": {
+              "$ref": "#/$defs/money"
+            },
+            "walletVersion": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amount",
+        "currency"
+      ],
+      "properties": {
+        "amount": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.[0-9]{2}$",
+          "description": "Exato em centavos int64; máximo 92233720368547758.07."
+        },
+        "currency": {
+          "enum": [
+            "BRL",
+            "USD"
+          ]
+        }
+      }
+    }
+  }
+}

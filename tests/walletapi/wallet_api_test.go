@@ -27,6 +27,10 @@ import (
 
 func walletAPIDatabase(t *testing.T) (context.Context, config.Config, *pgxpool.Pool) {
 	t.Helper()
+	// Variáveis exportadas no shell não podem ligar testes às filas da aplicação.
+	// O teste SQS usa fx.Replace com suas filas descartáveis explicitamente.
+	t.Setenv("SQS_ENABLED", "false")
+	t.Setenv("OUTBOX_ENABLED", "false")
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Fatal("Defina TEST_DATABASE_URL para testar a API com PostgreSQL real")
@@ -63,7 +67,7 @@ func walletAPIDatabase(t *testing.T) (context.Context, config.Config, *pgxpool.P
 		t.Fatal("Falha ao configurar banco isolado")
 	}
 	t.Cleanup(pool.Close)
-	for _, file := range []string{"000001_create_wallets.up.sql", "000002_wallet_opening.up.sql", "000003_bet.up.sql", "000004_win.up.sql", "000005_loss.up.sql", "000006_refund.up.sql", "000007_rollback.up.sql", "000008_ledger_queries.up.sql"} {
+	for _, file := range []string{"000001_create_wallets.up.sql", "000002_wallet_opening.up.sql", "000003_bet.up.sql", "000004_win.up.sql", "000005_loss.up.sql", "000006_refund.up.sql", "000007_rollback.up.sql", "000008_ledger_queries.up.sql", "000009_inbox.up.sql", "000010_outbox_publication.up.sql", "000011_financial_failed.up.sql"} {
 		data, err := os.ReadFile(filepath.Join("..", "..", "migrations", file))
 		if err != nil {
 			t.Fatal(err)
